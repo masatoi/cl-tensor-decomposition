@@ -143,4 +143,5 @@
       (initialize-matrix factor-matrix (random 1d0)))
     (decomposition-inner n-cycle X-indices-matrix X-value-vector X^-value-vector
                          factor-matrix-vector numerator-tmp denominator-tmp
-                         :verbose verbose)))
+                         :verbose verbose)
+    factor-matrix-vector))
