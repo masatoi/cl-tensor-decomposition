@@ -5,7 +5,7 @@
 (defparameter X-shape '(2 3 4))
 (defparameter X-indices-matrix
   (make-array '(3 3) :element-type 'fixnum
-              :initial-contents '((0 1 0)
+              :initial-contents '((0 1 0) ; The row corresponds one datum
                                   (1 2 3)
                                   (0 0 1))))
 (defparameter X-value-vector
