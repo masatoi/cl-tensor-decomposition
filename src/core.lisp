@@ -16,18 +16,23 @@
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array double-float) matrix)
            (type double-float default-value))
-  (loop for i from 0 below (array-dimension matrix 0) do
-    (loop for j from 0 below (array-dimension matrix 1) do
-      (setf (aref matrix i j) default-value))))
+  (loop for i fixnum from 0 below (array-dimension matrix 0) do
+    (loop for j fixnum from 0 below (array-dimension matrix 1) do
+      (setf (aref matrix i j) default-value)))
+  matrix)
 
 (defun sparse-kl-divergence (X-indices-matrix X-value-vector X^-value-vector)
-  (loop for datum-index from 0 below (array-dimension X-indices-matrix 0)
+  (declare (optimize (speed 3) (safety 0))
+           (type (simple-array fixnum) X-indices-matrix)
+           (type (simple-array double-float) X-value-vector X^-value-vector))
+  (loop for  datum-index fixnum from 0 below (array-dimension X-indices-matrix 0)
         sum (+ (* (aref X-value-vector datum-index)
                   (log (+ (/ (aref X-value-vector datum-index)
                              (aref X^-value-vector datum-index))
-                          *epsilon*)))
+                          (the double-float *epsilon*))))
                (- (aref X-value-vector datum-index))
-               (aref X^-value-vector datum-index))))
+               (aref X^-value-vector datum-index))
+        double-float))
 
 (defun calc-denominator (factor-matrix-vector factor-index denominator-tmp)
   (declare (optimize (speed 3) (safety 0))
