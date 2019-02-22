@@ -2,7 +2,11 @@
 
 (defpackage cl-tensor-decomposition
   (:use :cl)
-  (:nicknames :cltd))
+  (:nicknames :cltd)
+  (:export :initialize-matrix
+           :sparse-kl-divergence
+           :sdot
+           :decomposition))
 
 (in-package :cl-tensor-decomposition)
 
