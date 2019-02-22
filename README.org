@@ -1,5 +1,9 @@
 * cl-tensor-decomposition
 
+- Non-negative tensor decomposition for Common Lisp
+- Algorithm: Multiplicative Update (MU) for minimization of KL divergence
+- for Sparse tensor
+
 ** Installation
 #+BEGIN_SRC 
 ros install masatoi/cl-tensor-decomposition
@@ -14,10 +18,12 @@ ros install masatoi/cl-tensor-decomposition
 (defparameter X-shape '(2 3 4))
 
 (defparameter X-indices-matrix
-  (make-array '(3 3) :element-type 'fixnum
+  (make-array '(3 3) ; Data size x Number of mode
+              :element-type 'fixnum
               :initial-contents '((0 1 0) ; The row corresponds one datum
                                   (1 2 3)
                                   (0 0 1))))
+
 (defparameter X-value-vector
   (make-array 3 :element-type 'double-float :initial-contents '(1d0 2d0 3d0)))
 
