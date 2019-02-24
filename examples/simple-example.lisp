@@ -1,16 +1,3 @@
-* cl-tensor-decomposition
-
-- Non-negative tensor decomposition for Common Lisp
-- Algorithm: Multiplicative Update (MU) for minimization of KL divergence
-- for Sparse tensor
-
-** Installation
-#+BEGIN_SRC 
-ros install masatoi/cl-tensor-decomposition
-#+END_SRC
-
-** Usage
-#+BEGIN_SRC lisp
 (in-package :cltd)
 
 ;; Prepare sparse tensor
@@ -53,7 +40,3 @@ ros install masatoi/cl-tensor-decomposition
 ;;       (1.4550066567623938d-8 2.2551469795230017d0)
 ;;       (0.0d0 0.0d0)
 ;;       (2.645447975546872d0 7.443966374813667d-109)))
-#+END_SRC
-
-** Reference
-- 複合データ分析技術と NTFⅡ・完──テンソルデータの因子分解技術と実応用例── http://www.kecl.ntt.co.jp/icl/ls/members/tatsushi/PDF/IEICE_vol99_no7_691-698.pdf
