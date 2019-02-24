@@ -4,6 +4,7 @@
   (:use :cl)
   (:nicknames :cltd)
   (:export :initialize-matrix
+           :initialize-random-matrix
            :sparse-kl-divergence
            :sdot
            :decomposition))
@@ -19,6 +20,14 @@
   (loop for i fixnum from 0 below (array-dimension matrix 0) do
     (loop for j fixnum from 0 below (array-dimension matrix 1) do
       (setf (aref matrix i j) default-value)))
+  matrix)
+
+(defun initialize-random-matrix (matrix)
+  (declare (optimize (speed 3) (safety 0))
+           (type (simple-array double-float) matrix))
+  (loop for i fixnum from 0 below (array-dimension matrix 0) do
+    (loop for j fixnum from 0 below (array-dimension matrix 1) do
+      (setf (aref matrix i j) (random 1d0))))
   matrix)
 
 (defun sparse-kl-divergence (X-indices-matrix X-value-vector X^-value-vector)
@@ -149,7 +158,7 @@
                                      :element-type 'double-float
                                      :initial-element 1d0)))
     (loop for factor-matrix across factor-matrix-vector do
-      (initialize-matrix factor-matrix (random 1d0)))
+      (initialize-random-matrix factor-matrix))
     (decomposition-inner n-cycle X-indices-matrix X-value-vector X^-value-vector
                          factor-matrix-vector numerator-tmp denominator-tmp
                          :verbose verbose)
