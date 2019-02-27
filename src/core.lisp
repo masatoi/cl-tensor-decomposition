@@ -7,7 +7,8 @@
            :initialize-random-matrix
            :sparse-kl-divergence
            :sdot
-           :decomposition))
+           :decomposition
+           :ranking))
 
 (in-package :cl-tensor-decomposition)
 
@@ -163,3 +164,10 @@
                          factor-matrix-vector numerator-tmp denominator-tmp
                          :verbose verbose)
     factor-matrix-vector))
+
+(defun ranking (label-list factor-matrix r)
+  (let ((result (loop for i from 0 below (array-dimension factor-matrix 0)
+                      for label in label-list
+                      collect (cons label (aref factor-matrix i r)))))
+    (sort result (lambda (a b)
+                   (> (cdr a) (cdr b))))))

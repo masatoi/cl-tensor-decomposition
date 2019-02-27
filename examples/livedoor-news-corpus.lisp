@@ -44,7 +44,7 @@
 
 (defparameter n-non-zero
   (loop for sv in tf-idf-list sum (clol.vector:sparse-vector-length sv)))
-;; => 1373575 (density: 1%)
+;; => 1373575/135346524 (density: 1%)
 
 (defparameter X-indices-matrix
   ;; Number of non-zero elements x Number of mode
@@ -66,5 +66,28 @@
                    (aref (clol.vector:sparse-vector-value-vector sparse-vec) j))
              (incf nz-index))))
 
+;;; Training
+(defparameter R 6)
+
 (time (defparameter factor-matrix-vector
-        (decomposition X-shape X-indices-matrix X-value-vector :n-cycle 1000 :R 20 :verbose t)))
+        (decomposition X-shape X-indices-matrix X-value-vector :n-cycle 100 :R R :verbose nil)))
+
+;;; Show result
+(setf *print-length* 100)
+(ql:quickload :clgplot)
+
+;; Plot data x rank matrix
+(clgplot:splot-matrix (aref factor-matrix-vector 0))
+
+(defparameter word-vec (make-array (cadr X-shape)))
+(maphash (lambda (key value)
+           (setf (aref word-vec (car value)) key))
+         *word-hash*)
+
+;; Word list corresponding with index of X
+(defparameter word-list (coerce word-vec 'list))
+
+;; Word ranking per rank
+(loop for i from 0 below R do
+  (format t "~%~%R=~A" i)
+  (print (ranking word-list (aref factor-matrix-vector 1) i)))
