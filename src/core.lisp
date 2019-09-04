@@ -15,8 +15,7 @@
 (defparameter *epsilon* 0.000001d0)
 
 (defun initialize-matrix (matrix default-value)
-  (declare (optimize (speed 3) (safety 0))
-           (type (simple-array double-float) matrix)
+  (declare (type (simple-array double-float) matrix)
            (type double-float default-value))
   (loop for i fixnum from 0 below (array-dimension matrix 0) do
     (loop for j fixnum from 0 below (array-dimension matrix 1) do
@@ -24,8 +23,7 @@
   matrix)
 
 (defun initialize-random-matrix (matrix)
-  (declare (optimize (speed 3) (safety 0))
-           (type (simple-array double-float) matrix))
+  (declare (type (simple-array double-float) matrix))
   (loop for i fixnum from 0 below (array-dimension matrix 0) do
     (loop for j fixnum from 0 below (array-dimension matrix 1) do
       (setf (aref matrix i j) (random 1d0))))
@@ -35,17 +33,19 @@
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array fixnum) X-indices-matrix)
            (type (simple-array double-float) X-value-vector X^-value-vector))
-  (loop for  datum-index fixnum from 0 below (array-dimension X-indices-matrix 0)
+  (loop for datum-index fixnum from 0 below (array-dimension X-indices-matrix 0)
         sum (+ (* (aref X-value-vector datum-index)
-                  (log (+ (/ (aref X-value-vector datum-index)
-                             (aref X^-value-vector datum-index))
-                          (the double-float *epsilon*))))
+                  (the double-float
+                       (log (+ (/ (aref X-value-vector datum-index)
+                                  (aref X^-value-vector datum-index))
+                               (the double-float *epsilon*)))))
                (- (aref X-value-vector datum-index))
                (aref X^-value-vector datum-index))
         double-float))
 
 (defun calc-denominator (factor-matrix-vector factor-index denominator-tmp)
   (declare (optimize (speed 3) (safety 0))
+           (type simple-array factor-matrix-vector)
            (type (simple-array double-float) denominator-tmp)
            (type fixnum factor-index))
   (loop for other-factor-index fixnum from 0 below (length factor-matrix-vector)
@@ -63,6 +63,7 @@
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array fixnum) X-indices-matrix)
            (type (simple-array double-float) X-value-vector X^-value-vector)
+           (type simple-array factor-matrix-vector)
            (type fixnum factor-index))
   (loop for datum-index fixnum from 0 below (array-dimension X-indices-matrix 0) do
     (let ((x/x^ (/ (aref X-value-vector datum-index) (aref X^-value-vector datum-index))))
