@@ -1,11 +1,16 @@
 (ql:quickload :cl-docclass)
 
 (defpackage :livedoor-news-corpus
-  (:use :cl :cltd :cl-docclass :wiz-util))
+  (:use :cl :cltd :cl-docclass))
 
 (in-package :livedoor-news-corpus)
 
 (setf *print-length* 100)
+
+(defun ls (&optional dir)
+  (let ((dir (or dir (uiop:getcwd))))
+    (append (uiop:subdirectories dir)
+            (uiop:directory-files dir))))
 
 (defparameter *livedoor-data*
   (list
@@ -23,27 +28,32 @@
 
 ;;; Make dictionary (word-hash)
 
-(defparameter *word-hash* (make-hash-table :test 'equal))
-
-(time
- (dolist (file *livedoor-data-files*)
-   (docclass::add-words-to-hash-from-file! file *word-hash*)))
-;; 6.147 seconds of real time
-
-;; Removes infrequent words
-(setf *word-hash* (docclass::remove-infrequent-words *word-hash* 10))
-
 ;;; Make input data (List of sparse vectors)
 
-(defparameter tf-idf-list
-  (docclass::make-tf-idf-list-from-files *livedoor-data-files* *word-hash*))
+(defvar *tf-idf-list*)
+(defvar *word-hash*)
+
+(load-igo-dict)
+
+(time
+ (multiple-value-bind (tf-idf-list word-hash)
+     (docclass:make-tf-idf-list-from-files *livedoor-data-files*
+                                           :infrequent-threshold 10)
+   (setf *tf-idf-list* tf-idf-list
+         *word-hash* word-hash)))
 
 ;;; Make sparse tensor from sparse-vector list
 
-(defparameter X-shape '(7367 18372))
+(defparameter X-shape (list (length *livedoor-data-files*) ; 7367
+                            (hash-table-count *word-hash*) ; 18372
+                            ))
 
+;; Maximum possible count of words over whole documents
+(apply #'* X-shape) ; => 135346524
+
+;; Count of words that actually appear
 (defparameter n-non-zero
-  (loop for sv in tf-idf-list sum (clol.vector:sparse-vector-length sv)))
+  (loop for sv in *tf-idf-list* sum (clol.vector:sparse-vector-length sv)))
 ;; => 1373575/135346524 (density: 1%)
 
 (defparameter X-indices-matrix
@@ -52,10 +62,10 @@
               :element-type 'fixnum))
 
 (defparameter X-value-vector
-  (make-array n-non-zero :element-type 'double-float))
+  (make-array n-non-zero :element-type 'single-float))
 
 (let ((nz-index 0))
-  (loop for sparse-vec in tf-idf-list
+  (loop for sparse-vec in *tf-idf-list*
         for i from 0
         do
            (loop for j from 0 below (clol.vector:sparse-vector-length sparse-vec) do
