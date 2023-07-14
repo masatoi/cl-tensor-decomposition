@@ -1,4 +1,5 @@
 (ql:quickload :cl-docclass)
+(ql:quickload :cl-tensor-decomposition)
 
 (defpackage :livedoor-news-corpus
   (:use :cl :cltd :cl-docclass))
