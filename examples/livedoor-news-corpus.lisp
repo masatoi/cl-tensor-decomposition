@@ -80,7 +80,14 @@
 (defparameter R 6)
 
 (time (defparameter factor-matrix-vector
-        (decomposition X-shape X-indices-matrix X-value-vector :n-cycle 100 :R R :verbose nil)))
+        (decomposition X-shape X-indices-matrix X-value-vector :n-cycle 100 :R R :verbose t)))
+
+;; Evaluation took:
+;;   4.420 seconds of real time
+;;   4.421195 seconds of total run time (4.421195 user, 0.000000 system)
+;;   100.02% CPU
+;;   16,800,750,152 processor cycles
+;;   6,729,872 bytes consed
 
 ;;; Show result
 (setf *print-length* 100)

@@ -2,11 +2,16 @@
 (ql:quickload :cl-tensor-decomposition)
 
 (defpackage :reuters
-  (:use :cl :cltd :cl-docclass :wiz-util))
+  (:use :cl :cltd :cl-docclass))
 
 (in-package :reuters)
 
 (setf *print-length* 100)
+
+(defun ls (&optional dir)
+  (let ((dir (or dir (uiop:getcwd))))
+    (append (uiop:subdirectories dir)
+            (uiop:directory-files dir))))
 
 (defparameter *data-files*
   (ls #P"/home/wiz/datasets/reuters/"))
@@ -24,6 +29,8 @@
 
 (defparameter *word-hash* (make-hash-table :test 'equal))
 
+(load-igo-dict)
+
 (time
  (dolist (file *data-files*)
    (print file)
@@ -39,8 +46,14 @@
 ;;   1,310,797,444,477 processor cycles
 ;;   386,691,772,720 bytes consed
 
+;; *word-hash* is big size hash table
+;; #<HASH-TABLE :TEST EQUAL :COUNT 381152 {10217FFE53}>
+
 ;; Removes infrequent words
 (defparameter *word-hash-compact* (docclass::remove-infrequent-words *word-hash* 100))
+
+;; *word-hash-compact*
+;; #<HASH-TABLE :TEST EQUAL :COUNT 31477 {1012747D63}>
 
 ;;; Make input data (List of sparse vectors)
 
@@ -76,7 +89,7 @@
 (defparameter n-non-zero
   (loop for sv in tf-idf-list sum (clol.vector:sparse-vector-length sv)))
 ;; density
-(* (/ n-non-zero (apply #'* X-shape)) 100d0) ; => 0.4%
+(* (/ n-non-zero (apply #'* X-shape)) 100.0) ; => 0.4%
 
 
 (defparameter X-indices-matrix
@@ -85,7 +98,7 @@
               :element-type 'fixnum))
 
 (defparameter X-value-vector
-  (make-array n-non-zero :element-type 'double-float))
+  (make-array n-non-zero :element-type 'single-float))
 
 (let ((nz-index 0))
   (loop for sparse-vec in tf-idf-list
@@ -106,7 +119,7 @@
         (decomposition X-shape X-indices-matrix X-value-vector :n-cycle 1 :R R :verbose nil)))
 
 (time (defparameter factor-matrix-vector
-        (let ((cltd::*epsilon* 0.1d0))
+        (let ((cltd::*epsilon* 0.1))
           (decomposition X-shape X-indices-matrix X-value-vector :n-cycle 1 :R R :verbose t))))
 
 ;; Evaluation took:

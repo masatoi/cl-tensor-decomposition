@@ -38,9 +38,9 @@
   (loop for  datum-index fixnum from 0 below (array-dimension X-indices-matrix 0)
         sum (+ (* (aref X-value-vector datum-index)
                   (the single-float
-                       (log (+ (/ (aref X-value-vector datum-index)
-                                  (aref X^-value-vector datum-index))
-                               (the single-float *epsilon*)))))
+                       (log (/ (aref X-value-vector datum-index)
+                               (+ (aref X^-value-vector datum-index)
+                                  (the single-float *epsilon*))))))
                (- (aref X-value-vector datum-index))
                (aref X^-value-vector datum-index))
         single-float))
@@ -68,7 +68,9 @@
            (type simple-array factor-matrix-vector)
            (type fixnum factor-index))
   (loop for datum-index fixnum from 0 below (array-dimension X-indices-matrix 0) do
-    (let ((x/x^ (/ (aref X-value-vector datum-index) (aref X^-value-vector datum-index))))
+    (let ((x/x^ (/ (aref X-value-vector datum-index)
+                   (+ (aref X^-value-vector datum-index)
+                      (the single-float *epsilon*)))))
       (declare (type single-float x/x^))
       (let ((numerator-tmp-elem (svref numerator-tmp factor-index)))
         (declare (type (simple-array single-float) numerator-tmp-elem))
