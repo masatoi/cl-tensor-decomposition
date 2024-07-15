@@ -53,5 +53,9 @@ cycle: 10, kl-divergence: 0.7493448
 |#
 #+END_SRC
 
+*** Model of a sparse tensor
+A sparse tensor consists of pairs of non-zero values and indices.
+[[./docs/image/tensor-data-image.png]]
+
 ** Reference
 - 複合データ分析技術と NTFⅡ・完──テンソルデータの因子分解技術と実応用例── http://www.kecl.ntt.co.jp/icl/ls/members/tatsushi/PDF/IEICE_vol99_no7_691-698.pdf
