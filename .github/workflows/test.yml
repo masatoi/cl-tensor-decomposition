@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install Roswell
+        run: |
+          curl -L https://raw.githubusercontent.com/roswell/roswell/master/scripts/install-for-ci.sh | sh
+          echo "$HOME/.roswell/bin" >> $GITHUB_PATH
+
+      - name: Install Dependencies
+        run: |
+          ros install prove
+
+      - name: Run Tests
+        run: |
+          ros -e "(asdf:test-system :cl-tensor-decomposition)"

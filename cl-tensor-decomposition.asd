@@ -13,5 +13,5 @@
   :description "A tensor decomposition library for Common Lisp which support sparse tensor."
   :long-description
   #.(read-file-string
-     (subpathname *load-pathname* "README.org"))
+     (subpathname *load-pathname* "README.md"))
   :in-order-to ((test-op (test-op "cl-tensor-decomposition-test"))))

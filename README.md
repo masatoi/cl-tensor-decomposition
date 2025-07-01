@@ -1,3 +1,5 @@
+[![CI](https://github.com/masatoi/cl-tensor-decomposition/actions/workflows/test.yml/badge.svg)](https://github.com/masatoi/cl-tensor-decomposition/actions/workflows/test.yml)
+
 # cl-tensor-decomposition
 
 - Non-negative tensor decomposition implementation for Common Lisp
@@ -51,6 +53,11 @@ cycle: 10, kl-divergence: 0.7493448
       (0.0 0.0)
       (1.585384 0.0)))
 |#
+```
+
+## Testing
+```lisp
+(asdf:test-system :cl-tensor-decomposition)
 ```
 
 ### Model of a sparse tensor
