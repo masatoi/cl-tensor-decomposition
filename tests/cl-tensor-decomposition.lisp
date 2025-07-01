@@ -15,7 +15,7 @@
                                   (1 2 3)
                                   (0 0 1))))
 (defparameter X-value-vector
-  (make-array 3 :element-type 'single-float :initial-contents '(1.0 2.0 3.0)))
+  (make-array 3 :element-type 'double-float :initial-contents '(1.0d0 2.0d0 3.0d0)))
 
 (ok (decomposition X-shape X-indices-matrix X-value-vector :n-cycle 100 :R 2 :verbose t))
 
