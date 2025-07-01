@@ -1,16 +1,16 @@
-* cl-tensor-decomposition
+# cl-tensor-decomposition
 
 - Non-negative tensor decomposition implementation for Common Lisp
 - Update algorithm: Multiplicative Update (MU) for minimization of KL divergence
 - Support sparse tensor only
 
-** Installation
-#+BEGIN_SRC 
+## Installation
+```lisp
 ros install masatoi/cl-tensor-decomposition
-#+END_SRC
+```
 
-** Usage
-#+BEGIN_SRC lisp
+## Usage
+```lisp
 (in-package :cltd)
 
 ;; Prepare sparse tensor
@@ -51,12 +51,12 @@ cycle: 10, kl-divergence: 0.7493448
       (0.0 0.0)
       (1.585384 0.0)))
 |#
-#+END_SRC
+```
 
-*** Model of a sparse tensor
+### Model of a sparse tensor
 A sparse tensor consists of pairs of non-zero values and indices.
-[[./docs/images/tensor-data-image.png]]
+![Tensor Data Image](./docs/images/tensor-data-image.png)
 
-** Reference
+## Reference
 
-- Multiple Data Analysis and Non-negative Matrix/Tensor Factorization [II. Finish] : Tensor Data Analysis and Applications http://www.kecl.ntt.co.jp/icl/ls/members/tatsushi/PDF/IEICE_vol99_no7_691-698.pdf
+- [Multiple Data Analysis and Non-negative Matrix/Tensor Factorization [II. Finish] : Tensor Data Analysis and Applications](http://www.kecl.ntt.co.jp/icl/ls/members/tatsushi/PDF/IEICE_vol99_no7_691-698.pdf)
