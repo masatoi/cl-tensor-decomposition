@@ -28,7 +28,7 @@ ros install masatoi/cl-tensor-decomposition
                                   (0 0 1))))
 (defparameter X-value-vector
   (make-array number-of-non-zero-elements
-              :element-type 'single-float
+              :element-type 'double-float
               :initial-contents '(1.0 2.0 3.0)))
 
 ;; Decomposition
