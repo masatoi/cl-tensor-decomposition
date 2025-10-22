@@ -75,6 +75,15 @@ After running `cltd:decomposition`, you can summarise the factors with the repor
 (defparameter *factor-matrices*
   (cltd:decomposition X-shape X-indices-matrix X-value-vector :n-cycle 50 :R 3))
 
+;; Optional: smoothed KL convergence
+(multiple-value-bind (factors iterations)
+    (cltd:decomposition X-shape X-indices-matrix X-value-vector
+                        :n-cycle 200 :R 3
+                        :convergence-threshold 1d-4
+                        :convergence-window 5)
+  (declare (ignore factors))
+  (format t "stopped after ~a iterations~%" iterations))
+
 (defparameter *cards*
   (cltd:generate-factor-cards *factor-matrices*
                               X-indices-matrix
@@ -96,6 +105,8 @@ After running `cltd:decomposition`, you can summarise the factors with the repor
 ```
 
 `generate-factor-cards` returns nested alists; pass them to your JSON library of choice. `generate-report-artifacts` optionally accepts `:json-serializer` (a function of `(cards stream)`) so you can control JSON encoding, and always emits a human-oriented `report.md`.
+
+Set `:convergence-threshold` to enable early stopping based on a moving-average KL divergence check; the primary return value remains the factor matrices, and the secondary return value reports how many iterations actually ran.
 
 ### Model of a sparse tensor
 A sparse tensor consists of pairs of non-zero values and indices.

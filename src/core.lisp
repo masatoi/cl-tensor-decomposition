@@ -140,17 +140,49 @@
 
 (defun decomposition-inner (n-cycle X-indices-matrix X-value-vector X^-value-vector
                             factor-matrix-vector numerator-tmp denominator-tmp
-                            &key verbose)
-  (loop for i from 0 below n-cycle do
-    (sdot factor-matrix-vector X-indices-matrix X^-value-vector)
-    (update X-indices-matrix X-value-vector X^-value-vector
-      factor-matrix-vector (mod i (length factor-matrix-vector)) numerator-tmp denominator-tmp)
-    (when verbose
-      (format t "cycle: ~A, kl-divergence: ~A~%"
-              (1+ i)
-              (sparse-kl-divergence X-indices-matrix X-value-vector X^-value-vector)))))
+                            &key verbose convergence-threshold convergence-window)
+  (block done
+    (let* ((threshold (and convergence-threshold
+                           (coerce convergence-threshold 'double-float)))
+           (window (when threshold
+                     (let ((w (or convergence-window 5)))
+                       (when (or (null w) (<= w 0))
+                         (error "CONVERGENCE-WINDOW must be a positive integer."))
+                       w)))
+           (kl-buffer (when window
+                        (make-array window :element-type 'double-float :initial-element 0d0)))
+           (kl-count 0)
+           (kl-index 0)
+           (last-smooth nil)
+           (compute-kl? (or verbose threshold)))
+      (loop for i from 0 below n-cycle do
+        (sdot factor-matrix-vector X-indices-matrix X^-value-vector)
+        (update X-indices-matrix X-value-vector X^-value-vector
+          factor-matrix-vector (mod i (length factor-matrix-vector)) numerator-tmp denominator-tmp)
+        (let ((kl-value (when compute-kl?
+                          (sparse-kl-divergence X-indices-matrix X-value-vector X^-value-vector))))
+          (when verbose
+            (format t "cycle: ~A, kl-divergence: ~A~%"
+                    (1+ i)
+                    kl-value))
+          (when threshold
+            (setf (aref kl-buffer kl-index) kl-value)
+            (setf kl-index (mod (1+ kl-index) window))
+            (when (< kl-count window)
+              (incf kl-count))
+            (when (= kl-count window)
+              (let ((smooth (/ (loop for idx from 0 below window
+                                     sum (aref kl-buffer idx))
+                                window)))
+                (when last-smooth
+                  (when (< (abs (- smooth last-smooth)) threshold)
+                    (return-from done (values (1+ i)))))
+                (setf last-smooth smooth))))))
+      (values n-cycle))))
 
-(defun decomposition (X-shape X-indices-matrix X-value-vector &key (n-cycle 100) (R 20) verbose)
+(defun decomposition (X-shape X-indices-matrix X-value-vector
+                      &key (n-cycle 100) (R 20) verbose
+                      convergence-threshold convergence-window)
   (let ((X^-value-vector (make-array (length X-value-vector)
                                      :element-type 'double-float
                                      :initial-element 1.0d0))
@@ -171,10 +203,13 @@
                                      :initial-element 1.0d0)))
     (loop for factor-matrix across factor-matrix-vector do
       (initialize-random-matrix factor-matrix))
-    (decomposition-inner n-cycle X-indices-matrix X-value-vector X^-value-vector
-                         factor-matrix-vector numerator-tmp denominator-tmp
-                         :verbose verbose)
-    factor-matrix-vector))
+    (multiple-value-bind (iterations)
+        (decomposition-inner n-cycle X-indices-matrix X-value-vector X^-value-vector
+                             factor-matrix-vector numerator-tmp denominator-tmp
+                             :verbose verbose
+                             :convergence-threshold convergence-threshold
+                             :convergence-window convergence-window)
+      (values factor-matrix-vector iterations))))
 
 (defun ranking (label-list factor-matrix r)
   (let ((result (loop for i from 0 below (array-dimension factor-matrix 0)

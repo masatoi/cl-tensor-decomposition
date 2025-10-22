@@ -60,4 +60,14 @@
                (search "Scenario Cards" (uiop:read-file-string report-path)))
           "report.md written with content"))))
 
+(multiple-value-bind (result-vec iterations)
+    (cltd:decomposition X-shape X-indices-matrix X-value-vector
+                        :n-cycle 100
+                        :R 2
+                        :convergence-threshold 1d6
+                        :convergence-window 3)
+  (declare (ignore result-vec))
+  (ok (< iterations 100) "Convergence threshold stops early")
+  (ok (>= iterations 3) "At least window iterations executed"))
+
 (finalize)
