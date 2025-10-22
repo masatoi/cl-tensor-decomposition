@@ -8,7 +8,12 @@
            :sparse-kl-divergence
            :sdot
            :decomposition
-           :ranking))
+           :ranking
+           :make-mode-metadata
+           :generate-factor-cards
+           :write-factor-cards-json
+           :write-scenario-report
+           :generate-report-artifacts))
 
 (in-package :cl-tensor-decomposition)
 

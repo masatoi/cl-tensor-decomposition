@@ -60,6 +60,43 @@ cycle: 10, kl-divergence: 0.7493448
 (asdf:test-system :cl-tensor-decomposition)
 ```
 
+## Reporting
+
+After running `cltd:decomposition`, you can summarise the factors with the reporting helpers:
+
+```lisp
+(defparameter *metadata*
+  (list (cltd:make-mode-metadata :purchase '("purchase" "not_purchase")
+                                 :role :purchase
+                                 :discretization "binary flag")
+        (cltd:make-mode-metadata "genre" *genre-names*
+                                 :discretization "top categories")))
+
+(defparameter *factor-matrices*
+  (cltd:decomposition X-shape X-indices-matrix X-value-vector :n-cycle 50 :R 3))
+
+(defparameter *cards*
+  (cltd:generate-factor-cards *factor-matrices*
+                              X-indices-matrix
+                              X-value-vector
+                              *metadata*))
+
+;; Serialize with your preferred JSON encoder, e.g. cl-json:
+;; (with-open-file (out #P"factor_cards.json" :direction :output :if-exists :supersede :if-does-not-exist :create)
+;;   (cl-json:encode *cards* :stream out))
+
+(cltd:generate-report-artifacts *factor-matrices*
+                                X-indices-matrix
+                                X-value-vector
+                                *metadata*
+                                :json-serializer (lambda (data stream)
+                                                   (cl-json:encode data :stream stream))
+                                :factor-json-path #P"factor_cards.json"
+                                :report-path #P"report.md")
+```
+
+`generate-factor-cards` returns nested alists; pass them to your JSON library of choice. `generate-report-artifacts` optionally accepts `:json-serializer` (a function of `(cards stream)`) so you can control JSON encoding, and always emits a human-oriented `report.md`.
+
 ### Model of a sparse tensor
 A sparse tensor consists of pairs of non-zero values and indices.
 ![Tensor Data Image](./docs/images/tensor-data-image.png)
