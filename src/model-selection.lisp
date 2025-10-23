@@ -49,12 +49,12 @@
           unless (= (aref mask i) 1)
             collect i)))
 
-(defun %evaluate-fold (train-indices train-counts valid-indices valid-counts rank
+(defun %evaluate-fold (shape train-indices train-counts valid-indices valid-counts rank
                       &key (n-cycle 100) convergence-threshold convergence-window
                            (evaluation-function #'sparse-kl-divergence)
                            verbose)
   (multiple-value-bind (factor-matrix-vector iterations)
-      (decomposition (%build-shape train-indices)
+      (decomposition shape
                      train-indices
                      train-counts
                      :R rank
@@ -77,7 +77,10 @@
                                     random-state
                                     verbose)
   (let* ((nnz (array-dimension indices 0))
-         (folds (make-fold-splits indices counts k :random-state random-state))
+         (shape (%build-shape indices))
+         (folds (if random-state
+                    (make-fold-splits indices counts k :random-state random-state)
+                    (make-fold-splits indices counts k)))
          (results '()))
     (dolist (rank ranks)
       (let ((fold-scores '()))
@@ -86,7 +89,8 @@
               (%subset-tensor indices counts subset)
             (multiple-value-bind (train-indices train-counts)
                 (%subset-tensor indices counts (%complement-subset nnz subset))
-              (push (%evaluate-fold train-indices train-counts
+              (push (%evaluate-fold shape
+                                     train-indices train-counts
                                      valid-indices valid-counts rank
                                      :n-cycle n-cycle
                                      :convergence-threshold convergence-threshold
@@ -116,14 +120,17 @@
                              (evaluation-function #'sparse-kl-divergence)
                              random-state
                              verbose)
-  (let ((cv-results (cross-validate-rank indices counts ranks
-                                         :k k
-                                         :n-cycle n-cycle
-                                         :convergence-threshold convergence-threshold
-                                         :convergence-window convergence-window
-                                         :evaluation-function evaluation-function
-                                         :random-state random-state
-                                         :verbose verbose)))
+  (let* ((cv-key-args (list :k k
+                            :n-cycle n-cycle
+                            :convergence-threshold convergence-threshold
+                            :convergence-window convergence-window
+                            :evaluation-function evaluation-function
+                            :verbose verbose))
+         (cv-key-args (if random-state
+                          (append cv-key-args (list :random-state random-state))
+                          cv-key-args))
+         (cv-results (apply #'cross-validate-rank
+                            indices counts ranks cv-key-args)))
     (values (car (sort cv-results #'<
                        :key (lambda (result)
                               (cdr (assoc :mean result)))))

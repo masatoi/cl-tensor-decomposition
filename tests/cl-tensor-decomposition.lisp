@@ -103,4 +103,34 @@
       (ok (member (cdr (assoc :rank best)) ranks) "Best rank within candidates")
       (ok (= (cdr (assoc :rank best)) best-rank) "select-rank matches manual search"))))
 
+(let* ((unique-indices (make-array '(3 2) :element-type 'fixnum
+                                   :initial-contents '((0 0)
+                                                       (0 1)
+                                                       (1 2))))
+       (unique-counts (make-array 3 :element-type 'double-float
+                                  :initial-contents '(1d0 2d0 3d0))))
+  (ok (handler-case
+          (progn
+            (cltd:cross-validate-rank unique-indices unique-counts '(1)
+                                      :k 3
+                                      :n-cycle 5
+                                      :random-state (make-random-state t))
+            t)
+        (error (condition)
+          (declare (ignore condition))
+          nil))
+      "Cross-validation handles folds that hold out unique max index"))
+
+(let ((default-ranks '(1 2)))
+  (multiple-value-bind (default-best default-results)
+      (cltd:select-rank X-indices-matrix X-value-vector default-ranks
+                        :k 2
+                        :n-cycle 10
+                        :convergence-threshold 1d-4
+                        :convergence-window 3)
+    (ok (= (length default-results) (length default-ranks))
+        "Default select-rank returns per-rank results")
+    (ok (member (cdr (assoc :rank default-best)) default-ranks)
+        "Default select-rank chooses rank from candidates")))
+
 (finalize)
