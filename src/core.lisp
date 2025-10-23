@@ -9,6 +9,10 @@
            :sdot
            :decomposition
            :ranking
+           :decomposition-inner
+           :make-fold-splits
+           :cross-validate-rank
+           :select-rank
            :make-mode-metadata
            :generate-factor-cards
            :write-factor-cards-json

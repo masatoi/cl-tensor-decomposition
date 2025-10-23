@@ -70,4 +70,37 @@
   (ok (< iterations 100) "Convergence threshold stops early")
   (ok (>= iterations 3) "At least window iterations executed"))
 
+(let* ((ranks '(1 2))
+       (random-state (make-random-state t))
+       (splits (cltd:make-fold-splits X-indices-matrix X-value-vector 2
+                                      :random-state random-state)))
+  (ok (= (length splits) 2) "Two folds generated")
+  (let ((all-indices (sort (copy-list (apply #'append splits)) #'<)))
+    (ok (equal all-indices '(0 1 2)) "All indices covered exactly once"))
+  (let* ((cv-results (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
+                                              :k 2
+                                              :n-cycle 10
+                                              :random-state (make-random-state t)
+                                              :convergence-threshold 1d-4
+                                              :convergence-window 3))
+         (best-rank nil)
+         (best-mean most-positive-double-float))
+    (ok (= (length cv-results) (length ranks)) "Cross-validation returns entry per rank")
+    (dolist (result cv-results)
+      (let ((rank (cdr (assoc :rank result)))
+            (mean (cdr (assoc :mean result))))
+        (when (< mean best-mean)
+          (setf best-mean mean
+                best-rank rank))))
+    (multiple-value-bind (best all-results)
+        (cltd:select-rank X-indices-matrix X-value-vector ranks
+                          :k 2
+                          :n-cycle 10
+                          :random-state (make-random-state t)
+                          :convergence-threshold 1d-4
+                          :convergence-window 3)
+      (ok (= (length all-results) (length ranks)) "select-rank echoes full results")
+      (ok (member (cdr (assoc :rank best)) ranks) "Best rank within candidates")
+      (ok (= (cdr (assoc :rank best)) best-rank) "select-rank matches manual search"))))
+
 (finalize)

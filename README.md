@@ -108,6 +108,35 @@ After running `cltd:decomposition`, you can summarise the factors with the repor
 
 Set `:convergence-threshold` to enable early stopping based on a moving-average KL divergence check; the primary return value remains the factor matrices, and the secondary return value reports how many iterations actually ran.
 
+## Rank Selection
+
+Use `select-rank` for k-fold cross-validation over candidate ranks:
+
+```lisp
+(multiple-value-bind (best all-results)
+    (cltd:select-rank X-indices-matrix X-value-vector
+                      '(5 10 15)
+                      :k 3
+                      :n-cycle 50
+                      :convergence-threshold 1d-4
+                      :convergence-window 5
+                      :random-state (make-random-state t))
+  (format t "best rank: ~a with mean KL ~,5f~%"
+          (cdr (assoc :rank best))
+          (cdr (assoc :mean best)))
+  all-results)
+
+(multiple-value-bind (factors iterations)
+    (cltd:decomposition X-shape X-indices-matrix X-value-vector
+                        :R (cdr (assoc :rank best))
+                        :convergence-threshold 1d-4
+                        :convergence-window 5)
+  (declare (ignore iterations))
+  factors)
+```
+
+`cross-validate-rank` returns detailed fold statistics if you need manual inspection; pass your own evaluation function to use RMSEやMAEなど別指標。
+
 ### Model of a sparse tensor
 A sparse tensor consists of pairs of non-zero values and indices.
 ![Tensor Data Image](./docs/images/tensor-data-image.png)
