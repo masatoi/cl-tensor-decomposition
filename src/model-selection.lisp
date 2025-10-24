@@ -81,6 +81,8 @@
          (folds (if random-state
                     (make-fold-splits indices counts k :random-state random-state)
                     (make-fold-splits indices counts k)))
+         (total (* (length ranks) (length folds)))
+         (completed 0)
          (results '()))
     (dolist (rank ranks)
       (let ((fold-scores '()))
@@ -97,7 +99,13 @@
                                      :convergence-window convergence-window
                                      :evaluation-function evaluation-function
                                      :verbose verbose)
-                    fold-scores))))
+                    fold-scores)
+               (incf completed)
+               (let* ((ratio (/ completed (max 1 total)))
+                      (percent (* 100d0 (coerce ratio 'double-float))))
+                 (format t "Cross-validation progress ~D/~D (~,2F%%)~%"
+                         completed total percent)
+                 (finish-output)))))
         (let* ((mean (/ (reduce #'+ fold-scores) (length fold-scores)))
                (variance (if (> (length fold-scores) 1)
                              (/ (reduce #'+ fold-scores

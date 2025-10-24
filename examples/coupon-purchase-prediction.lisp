@@ -1,7 +1,7 @@
 ;;; Coupon Purchase Prediction
 ;;; https://www.kaggle.com/c/coupon-purchase-prediction/overview
 
-(ql:quickload '(:fare-csv :cl-tensor-decomposition))
+(ql:quickload '(:fare-csv :cl-tensor-decomposition :cl-json))
 
 (defpackage :coupon-purchase-prediction
   (:use :cl :cltd :fare-csv))
@@ -239,31 +239,95 @@
 ;;; Run
 
 (defparameter *result*
-  (decomposition *X-shape* *X-indices-matrix* *X-value-vector* :n-cycle 2000 :R 20 :verbose t))
+  (decomposition *X-shape* *X-indices-matrix* *X-value-vector*
+                 :n-cycle 2000
+                 :R 20
+                 :verbose t
+                 :convergence-threshold 1d-5
+                 :convergence-window 100))
+
+(defparameter *age-buckets*
+  '("0-10" "10-20" "20-30" "30-40" "40-50" "50-60" "60-70" "70-80" "80-90" "90-100"))
+
+(defparameter *prefecture-labels*
+  (cons "none" *pref-names*))
+
+(defparameter *coupon-mode-metadata*
+  (list (cltd:make-mode-metadata :purchase '("purchase" "not_purchase")
+                                 :role :purchase
+                                 :positive-label "purchase"
+                                 :negative-label "not_purchase"
+                                 :discretization "binary")
+        (cltd:make-mode-metadata "sex" '("male" "female")
+                                 :discretization "binary")
+        (cltd:make-mode-metadata "age" *age-buckets*
+                                 :discretization "decade")
+        (cltd:make-mode-metadata "user_prefecture" *prefecture-labels*
+                                 :discretization "prefecture")
+        (cltd:make-mode-metadata "genre" *genre-names*
+                                 :discretization "genre catalog")
+        (cltd:make-mode-metadata "price_rate" *age-buckets*
+                                 :discretization "decile")
+        (cltd:make-mode-metadata "coupon_prefecture" *prefecture-labels*
+                                 :discretization "prefecture")))
 
 ;;; Visualize
 
 (defun report (result)
   (let* ((indent 4)
-         (rank (array-dimension (aref *result* 0) 1))
+         (rank (array-dimension (aref result 0) 1))
          (label-features '("purchase" "sex" "age" "user-pref" "genre" "price-rate" "coupon-pref"))
-         (one-tenth '("0-10" "10-20" "20-30" "30-40" "40-50" "50-60" "60-70" "70-80" "80-90" "90-100"))
          (label-values `(("purchase" "not-purchase")
                          ("male" "female")
-                         ,one-tenth
-                         ("none" ,@*pref-names*)
+                         ,*age-buckets*
+                         ,*prefecture-labels*
                          ,*genre-names*
-                         ,one-tenth
-                         ("none" ,@*pref-names*))))
+                         ,*age-buckets*
+                         ,*prefecture-labels*)))
     (dotimes (r rank)
       (format t "~%=== rank=~A ==============================================~%" r)
-      (loop for feature-name in label-features
-            for values-name in label-values
-            for i from 0
-            do (format t "~%[~A, rank=~A]~%" feature-name r)
-               (loop for pair in (ranking values-name (aref result i) r)
-                     for i from 0 below 10
-                     do (format t "~VT~A~vT~A~%" indent (car pair) 20 (cdr pair)))))))
+      (loop for feature-index from 0
+            for feature-name in label-features
+            for labels in label-values do
+        (format t "~%[~A, rank=~A]~%" feature-name r)
+        (loop for pair in (ranking labels (aref result feature-index) r)
+              for i from 0 below 10
+              do (format t "~VT~A~V@T~,6F~%" indent (car pair) (+ indent 22) (cdr pair)))))))
+
+;;; Model selection example -------------------------------------------------
+
+(defun cross-validate-rank-example (&key (ranks '(10 15 20)) (k 3) (n-cycle 2000))
+  "Run cross-validation on the coupon tensor and return the best rank entry and all fold scores."
+  (let ((random-state (make-random-state t)))
+    (multiple-value-bind (best results)
+        (cltd:select-rank *X-indices-matrix* *X-value-vector* ranks
+                          :k k
+                          :n-cycle n-cycle
+                          :random-state random-state
+                          :convergence-threshold 1d-5
+                          :convergence-window 10)
+      (format t "Best rank ~A with mean KL ~,6F~%"
+              (cdr (assoc :rank best))
+              (cdr (assoc :mean best)))
+      (values best results))))
+
+(cross-validate-rank-example)
+
+;;; JSON export example -----------------------------------------------------
+
+(defun export-factor-cards-as-json (factor-matrix-vector &key (json-path #P"factor_cards.json") (report-path #P"factor_report.md"))
+  "Generate scenario cards for FACTOR-MATRIX-VECTOR and export them to JSON and Markdown."
+  (cltd:generate-report-artifacts factor-matrix-vector
+                                  *X-indices-matrix*
+                                  *X-value-vector*
+                                  *coupon-mode-metadata*
+                                  :factor-json-path json-path
+                                  :report-path report-path
+                                  :json-serializer (lambda (cards stream)
+                                                     (write-string (cl-json:encode-json-to-string cards)
+                                                                   stream)))
+  (format t "Wrote ~A and ~A~%" json-path report-path)
+  (values json-path report-path))
 
 (report *result*)
 
