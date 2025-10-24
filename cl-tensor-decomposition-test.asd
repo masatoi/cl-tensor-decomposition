@@ -3,14 +3,13 @@
 |#
 
 (defsystem "cl-tensor-decomposition-test"
-  :defsystem-depends-on ("prove-asdf")
   :author ""
   :license ""
   :depends-on ("cl-tensor-decomposition"
-               "prove")
+               "rove")
   :components ((:module "tests"
                 :components
-                ((:test-file "cl-tensor-decomposition"))))
+                ((:file "cl-tensor-decomposition"))))
   :description "Test system for cl-tensor-decomposition"
 
-  :perform (test-op (op c) (symbol-call :prove-asdf :run-test-system c)))
+  :perform (test-op (op c) (uiop:symbol-call :rove '#:run c)))
