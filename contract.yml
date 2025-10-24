@@ -1,0 +1,89 @@
+version: 1
+
+scope:
+  allow_paths:
+    - 'src/**/*.lisp'
+    - 'tests/**/*.lisp'
+    - 'examples/**/*.lisp'
+    - '*.asd'
+  deny_paths:
+    - '**/*.fasl'
+    - '**/*.dx*fsl'
+    - '**/*.lx*fsl'
+    - '**/*.x86f'
+    - 'contract.yml'
+
+limits:
+  max_total_changed_lines: 400
+  max_files_changed: 12
+
+ai:
+  default:
+    system_prompt: |
+      You are a senior Common Lisp engineer contributing to the cl-tensor-decomposition project.
+      This project implements tensor decomposition algorithms in Common Lisp.
+
+      Follow these strict conventions:
+      - Indent with two spaces; avoid hard tabs
+      - Use lower-case, hyphen-separated names (e.g., calculate-update-step)
+      - Special (global) variables must be earmuffed (e.g., *epsilon*)
+      - Numeric literals should be double-float (1.0d0) unless explicitly generic
+      - Prefer CL LOOP with clause-per-line formatting
+      - Keep ASDF system definitions (*.asd) in sync with code changes
+      - Tests use the Prove harness: (plan nil), ok/diag, (finalize)
+      - Examples under examples/ should be runnable Roswell scripts
+    max_concurrency: 4
+  checks:
+    - name: naming_conventions
+      prompt: |
+        Naming conventions check:
+        - Are all function and variable names lower-case with hyphens (e.g., calculate-update-step)?
+        - Are global/special variables earmuffed with *asterisks* (e.g., *epsilon*, *default-tolerance*)?
+        - Do symbol names follow Common Lisp conventions without abbreviations unless standard?
+
+    - name: numeric_types
+      prompt: |
+        Numeric type consistency check:
+        - Are numeric literals in arithmetic operations double-float (1.0d0, 2.0d0)?
+        - Is generic arithmetic avoided unless explicitly required?
+        - Are type declarations used appropriately for performance-critical code?
+
+    - name: documentation
+      prompt: |
+        Documentation requirements:
+        - Do all exported functions include English docstrings?
+        - Do docstrings summarize arguments and return values clearly?
+        - Are algorithmic choices and non-trivial decisions commented?
+        - Is obvious code left uncommented (avoid restating what code does)?
+
+    - name: package_structure
+      prompt: |
+        Package and module structure:
+        - Are package definitions at the top of each file?
+        - Is only the public API exported from src/core.lisp?
+        - When new modules are added, are ASDF system definitions (*.asd) updated?
+        - Do all exported symbols have corresponding documentation?
+
+    - name: testing
+      prompt: |
+        Testing requirements:
+        - Do tests use the Prove framework correctly: (plan nil), ok/diag, (finalize)?
+        - Are new functions accompanied by corresponding tests?
+        - Do cross-validation utilities print progress for long runs?
+        - Is test logging concise and informative?
+
+    - name: code_style
+      prompt: |
+        Code style and idioms:
+        - Is indentation consistent with two spaces (no tabs)?
+        - Do LOOP forms use clause-per-line formatting with proper indentation?
+        - Are inner loops properly indented for readability?
+        - Does the code follow idiomatic Common Lisp patterns?
+
+    - name: examples_and_workflow
+      prompt: |
+        Examples and workflow:
+        - Are examples under examples/ runnable as Roswell scripts?
+        - Do examples follow the same numeric and type conventions as core library?
+        - When user-facing behavior changes, is README or examples/ updated?
+        - Is there alignment between src/core.lisp exports and documentation?
