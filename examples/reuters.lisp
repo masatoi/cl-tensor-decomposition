@@ -98,7 +98,7 @@
               :element-type 'fixnum))
 
 (defparameter X-value-vector
-  (make-array n-non-zero :element-type 'single-float))
+  (make-array n-non-zero :element-type 'double-float))
 
 (let ((nz-index 0))
   (loop for sparse-vec in tf-idf-list
@@ -109,7 +109,8 @@
              (setf (aref X-indices-matrix nz-index 1)
                    (aref (clol.vector:sparse-vector-index-vector sparse-vec) j))
              (setf (aref X-value-vector nz-index)
-                   (aref (clol.vector:sparse-vector-value-vector sparse-vec) j))
+                   (coerce (aref (clol.vector:sparse-vector-value-vector sparse-vec) j)
+                           'double-float))
              (incf nz-index))))
 
 ;;; Training

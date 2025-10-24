@@ -220,8 +220,8 @@
 
 (defparameter *X-value-vector*
   (make-array *number-of-non-zero-elements*
-              :element-type 'single-float
-              :initial-element 0.0))
+              :element-type 'double-float
+              :initial-element 0d0))
 
 (defun set-row (array i row)
   (loop for j from 0
@@ -232,7 +232,7 @@
  (let ((i 0))
    (maphash (lambda (indices cnt)
               (set-row *X-indices-matrix* i indices)
-              (setf (aref *x-value-vector* i) (* cnt 1.0))
+              (setf (aref *x-value-vector* i) (* cnt 1.0d0))
               (incf i))
             *indices-table-for-count-dence-elem*)))
 
