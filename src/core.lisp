@@ -24,6 +24,7 @@
 (defparameter *epsilon* 0.000001d0)
 
 (defun initialize-matrix (matrix default-value)
+  "Fill MATRIX with DEFAULT-VALUE and return the mutated matrix."
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array double-float) matrix)
            (type double-float default-value))
@@ -33,6 +34,7 @@
   matrix)
 
 (defun initialize-random-matrix (matrix)
+  "Fill MATRIX with uniform random double-float values in [0, 1)."
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array double-float) matrix))
   (loop for i fixnum from 0 below (array-dimension matrix 0) do
@@ -41,6 +43,7 @@
   matrix)
 
 (defun sparse-kl-divergence (X-indices-matrix X-value-vector X^-value-vector)
+  "Compute the Kullback–Leibler divergence between sparse counts and their approximation."
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array fixnum) X-indices-matrix)
            (type (simple-array double-float) X-value-vector X^-value-vector))
@@ -122,6 +125,7 @@
                        (the double-float *epsilon*)))))))))
 
 (defun sdot (factor-matrix-vector X-indices-matrix X^-value-vector)
+  "Reconstruct sparse observations into X^-VALUE-VECTOR using FACTOR-MATRIX-VECTOR."
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array fixnum) X-indices-matrix)
            (type (simple-array double-float) X^-value-vector))
@@ -145,6 +149,7 @@
 (defun decomposition-inner (n-cycle X-indices-matrix X-value-vector X^-value-vector
                             factor-matrix-vector numerator-tmp denominator-tmp
                             &key verbose convergence-threshold convergence-window)
+  "Iteratively update FACTOR-MATRIX-VECTOR up to N-CYCLE steps, honoring convergence controls."
   (block done
     (let* ((threshold (and convergence-threshold
                            (coerce convergence-threshold 'double-float)))
@@ -179,14 +184,31 @@
                                      sum (aref kl-buffer idx))
                                 window)))
                 (when last-smooth
-                  (when (< (abs (- smooth last-smooth)) threshold)
-                    (return-from done (values (1+ i)))))
+                  (let* ((delta (abs (- smooth last-smooth)))
+                         (base (max (abs last-smooth) *epsilon*))
+                         (ratio (/ delta base)))
+                    (when (< ratio threshold)
+                      (return-from done (values (1+ i))))))
                 (setf last-smooth smooth))))))
       (values n-cycle))))
 
 (defun decomposition (X-shape X-indices-matrix X-value-vector
                       &key (n-cycle 100) (R 20) verbose
                       convergence-threshold convergence-window)
+  "Run multiplicative-update tensor decomposition on sparse data.
+
+X-SHAPE       — list of tensor dimensions per mode.
+X-INDICES-MATRIX — fixnum matrix of non-zero coordinates, one row per datum.
+X-VALUE-VECTOR  — double-float vector of observed counts aligned with X-INDICES-MATRIX.
+N-CYCLE       — maximum iterations to perform; defaults to 100.
+R             — latent rank shared across factor matrices; defaults to 20.
+VERBOSE       — when true, emit per-iteration KL divergence logs; defaults to NIL (silent).
+CONVERGENCE-THRESHOLD — optional double-float tolerance on the relative change between
+                        successive smoothed KL averages (e.g., 1d-3 ≈ 0.1% change).
+CONVERGENCE-WINDOW   — length (positive integer) of the smoothing window; defaults to 5 when
+                        CONVERGENCE-THRESHOLD is provided, otherwise ignored.
+
+Returns the factor-matrix vector and the number of iterations actually executed."
   (let ((X^-value-vector (make-array (length X-value-vector)
                                      :element-type 'double-float
                                      :initial-element 1.0d0))
@@ -216,6 +238,7 @@
       (values factor-matrix-vector iterations))))
 
 (defun ranking (label-list factor-matrix r)
+  "Return LABEL-LIST paired with weights from FACTOR-MATRIX column R, sorted descending."
   (let ((result (loop for i from 0 below (array-dimension factor-matrix 0)
                       for label in label-list
                       collect (cons label (aref factor-matrix i r)))))
