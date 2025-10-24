@@ -16,6 +16,7 @@ scope:
 limits:
   max_total_changed_lines: 400
   max_files_changed: 12
+  severity: warning
 
 ai:
   default:
@@ -30,7 +31,7 @@ ai:
       - Numeric literals should be double-float (1.0d0) unless explicitly generic
       - Prefer CL LOOP with clause-per-line formatting
       - Keep ASDF system definitions (*.asd) in sync with code changes
-      - Tests use the Prove harness: (plan nil), ok/diag, (finalize)
+      - Tests use the Rove harness with deftest/ok assertions
       - Examples under examples/ should be runnable Roswell scripts
     max_concurrency: 4
   checks:
@@ -67,7 +68,7 @@ ai:
     - name: testing
       prompt: |
         Testing requirements:
-        - Do tests use the Prove framework correctly: (plan nil), ok/diag, (finalize)?
+        - Do tests use the Rove framework with organised deftest blocks and ok assertions?
         - Are new functions accompanied by corresponding tests?
         - Do cross-validation utilities print progress for long runs?
         - Is test logging concise and informative?
