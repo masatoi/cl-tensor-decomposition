@@ -17,6 +17,76 @@
 (defparameter X-value-vector
   (make-array 3 :element-type 'double-float :initial-contents '(1.0d0 2.0d0 3.0d0)))
 
+(defparameter +test-epsilon+ 1d-6)
+
+(let ((matrix (make-array '(2 2) :element-type 'double-float :initial-element 0d0)))
+  (cltd:initialize-matrix matrix 2d0)
+  (ok (loop for i from 0 below 2 always
+            (loop for j from 0 below 2 always (= (aref matrix i j) 2d0)))
+      "initialize-matrix fills matrix with default value"))
+
+(let* ((matrix (make-array '(2 3) :element-type 'double-float :initial-element 0d0))
+       (state (make-random-state t))
+       (expected-state (make-random-state state))
+       (expected (make-array '(2 3) :element-type 'double-float)))
+  (loop for i from 0 below 2 do
+    (loop for j from 0 below 3 do
+      (setf (aref expected i j) (random 1.0d0 expected-state))))
+  (let ((*random-state* state))
+    (cltd:initialize-random-matrix matrix))
+  (let ((max-diff 0d0))
+    (loop for i from 0 below 2 do
+      (loop for j from 0 below 3 do
+        (setf max-diff (max max-diff
+                             (abs (- (aref matrix i j)
+                                     (aref expected i j)))))))
+    (ok (< max-diff +test-epsilon+)
+        "initialize-random-matrix draws reproducible values")))
+
+(let* ((approx (make-array 3 :element-type 'double-float
+                           :initial-contents '(1.5d0 1.8d0 2.5d0)))
+       (values (make-array 3 :element-type 'double-float
+                           :initial-contents '(1d0 2d0 3d0)))
+       (kl (cltd:sparse-kl-divergence X-indices-matrix values approx))
+       (epsilon cltd::*epsilon*)
+       (expected 0d0))
+  (loop for idx from 0 below (length values) do
+    (let* ((x (aref values idx))
+           (xhat (aref approx idx)))
+      (incf expected (+ (* x (log (/ x (+ xhat epsilon))))
+                        (- x)
+                        xhat))))
+  (ok (< (abs (- kl expected)) +test-epsilon+)
+      "sparse-kl-divergence matches manual computation"))
+
+(let* ((mode0 (make-array '(2 2) :element-type 'double-float
+                          :initial-contents '((0.6d0 0.4d0)
+                                              (0.2d0 0.8d0))))
+       (mode1 (make-array '(2 2) :element-type 'double-float
+                          :initial-contents '((0.5d0 0.5d0)
+                                              (0.7d0 0.3d0))))
+       (factor-matrices (make-array 2 :initial-contents (list mode0 mode1)))
+       (indices (make-array '(2 2) :element-type 'fixnum
+                            :initial-contents '((0 1)
+                                                (1 0))))
+       (approx (make-array 2 :element-type 'double-float :initial-element 0d0)))
+  (cltd:sdot factor-matrices indices approx)
+  (let ((expected '(0.54d0 0.5d0)))
+    (ok (loop for idx from 0 below (length expected) always
+              (< (abs (- (aref approx idx) (nth idx expected))) +test-epsilon+))
+        "sdot multiplies factors into reconstruction")))
+
+(let* ((labels '("alpha" "beta" "gamma"))
+       (matrix (make-array '(3 2) :element-type 'double-float
+                           :initial-contents '((0.15d0 0.60d0)
+                                               (0.45d0 0.25d0)
+                                               (0.40d0 0.15d0))))
+       (ranking (cltd:ranking labels matrix 0)))
+  (ok (equal ranking '(("beta" . 0.45d0)
+                       ("gamma" . 0.40d0)
+                       ("alpha" . 0.15d0)))
+      "ranking sorts labels by score"))
+
 (ok (decomposition X-shape X-indices-matrix X-value-vector :n-cycle 100 :R 2 :verbose t))
 
 (let* ((mode0 (make-array '(2 2) :element-type 'double-float
@@ -103,6 +173,58 @@
       (ok (member (cdr (assoc :rank best)) ranks) "Best rank within candidates")
       (ok (= (cdr (assoc :rank best)) best-rank) "select-rank matches manual search"))))
 
+(let* ((ranks '(2))
+       (results (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
+                                          :k 5
+                                          :n-cycle 5
+                                          :random-state (make-random-state t))))
+  (let* ((result (first results))
+         (scores (cdr (assoc :scores result))))
+    (ok (= (length scores) 5) "k greater than nnz yields score per fold")
+    (ok (every #'numberp scores) "scores remain numeric even for empty folds")))
+
+(let* ((results (cltd:cross-validate-rank X-indices-matrix X-value-vector '(1)
+                                          :k 1
+                                          :n-cycle 5
+                                          :random-state (make-random-state t)))
+       (scores (cdr (assoc :scores (first results)))))
+  (ok (= (length scores) 1) "k = 1 degenerates to single fold")
+  (ok (every #'numberp scores) "Single-fold score is numeric"))
+
+(let* ((seed (make-random-state t))
+       (ranks '(1 2))
+       (first-run (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
+                                            :k 3
+                                            :n-cycle 10
+                                            :random-state (make-random-state seed)))
+       (second-run (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
+                                             :k 3
+                                             :n-cycle 10
+                                             :random-state (make-random-state seed)))
+       (no-seed (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
+                                          :k 3
+                                          :n-cycle 10)))
+  (ok (equalp first-run second-run)
+      "Providing the same random-state reproduces fold scores")
+  (ok (= (length no-seed) (length ranks))
+      "Cross-validation still returns results without random-state"))
+
+(labels ((always-42 (indices counts approx)
+           (declare (ignore indices counts approx))
+           42d0))
+  (let ((results (cltd:cross-validate-rank X-indices-matrix X-value-vector '(1 2)
+                                           :k 2
+                                           :n-cycle 5
+                                           :random-state (make-random-state t)
+                                           :evaluation-function #'always-42)))
+    (dolist (result results)
+      (let ((scores (cdr (assoc :scores result)))
+            (mean (cdr (assoc :mean result))))
+        (ok (every (lambda (score) (= score 42d0)) scores)
+            "Custom evaluation function overrides fold score computation")
+        (ok (= mean 42d0)
+            "Mean reflects custom evaluation metric")))))
+
 (let* ((unique-indices (make-array '(3 2) :element-type 'fixnum
                                    :initial-contents '((0 0)
                                                        (0 1)
@@ -132,5 +254,75 @@
         "Default select-rank returns per-rank results")
     (ok (member (cdr (assoc :rank default-best)) default-ranks)
         "Default select-rank chooses rank from candidates")))
+
+(let* ((mode0 (make-array '(2 1) :element-type 'double-float :initial-element 0.5d0))
+       (mode1 (make-array '(3 1) :element-type 'double-float :initial-element 0.3d0))
+       (factor-matrices (make-array 2 :initial-contents (list mode0 mode1)))
+       (metadata (list (cltd:make-mode-metadata "only" '("a" "b")))))
+  (ok (handler-case
+          (progn
+            (cltd::ensure-mode-specs metadata factor-matrices)
+            nil)
+        (error () t))
+      "ensure-mode-specs rejects metadata count mismatch")
+  (ok (handler-case
+          (progn
+            (cltd::ensure-mode-specs (list (cltd:make-mode-metadata "mode" '("a")))
+                                     (make-array 1 :initial-contents (list mode0)))
+            nil)
+        (error () t))
+      "ensure-mode-specs rejects label count mismatch")
+  (ok (handler-case
+          (progn
+            (cltd::ensure-mode-specs (list (list :name "mode"
+                                                 :labels '("yes" "no")
+                                                 :positive-label "missing"))
+                                     (make-array 1 :initial-contents (list mode0)))
+            nil)
+        (error () t))
+      "ensure-mode-specs rejects unknown positive label"))
+
+(uiop:with-temporary-file (:pathname json-path :suffix "json")
+  (ok (handler-case
+          (progn
+            (cltd:write-factor-cards-json '() json-path)
+            nil)
+        (error () t))
+      "write-factor-cards-json requires serializer"))
+
+(uiop:with-temporary-file (:pathname json-path :suffix "json" :keep t)
+  (uiop:with-temporary-file (:pathname report-path :suffix "md" :keep t)
+    (let* ((mode0 (make-array '(2 2) :element-type 'double-float
+                              :initial-contents '((0.6d0 0.2d0)
+                                                  (0.4d0 0.8d0))))
+           (mode1 (make-array '(3 2) :element-type 'double-float
+                              :initial-contents '((0.7d0 0.2d0)
+                                                  (0.2d0 0.3d0)
+                                                  (0.1d0 0.5d0))))
+           (factor-matrices (make-array 2 :initial-contents (list mode0 mode1)))
+           (indices (make-array '(4 2) :element-type 'fixnum
+                                :initial-contents '((0 0)
+                                                    (0 1)
+                                                    (1 0)
+                                                    (1 2))))
+           (counts (make-array 4 :element-type 'double-float
+                               :initial-contents '(30d0 10d0 5d0 15d0)))
+           (metadata (list (cltd:make-mode-metadata :purchase '("purchase" "not_purchase")
+                                                    :role :purchase
+                                                    :positive-label "purchase"
+                                                    :negative-label "not_purchase"
+                                                    :discretization "binary")
+                           (cltd:make-mode-metadata "genre" '("gourmet" "beauty" "travel")
+                                                    :discretization "manual top3"))))
+      (cltd:generate-report-artifacts factor-matrices indices counts metadata
+                                      :factor-json-path json-path
+                                      :report-path report-path
+                                      :json-serializer (lambda (cards stream)
+                                                        (declare (ignore cards))
+                                                        (write-string "[]" stream)))
+      (ok (probe-file json-path)
+          "generate-report-artifacts writes JSON output")
+      (ok (search "Scenario Cards" (uiop:read-file-string report-path))
+          "generate-report-artifacts writes markdown report"))))
 
 (finalize)
