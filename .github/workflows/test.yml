@@ -20,7 +20,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          ros install prove
+          ros install rove
 
       - name: Run Tests
         run: |
