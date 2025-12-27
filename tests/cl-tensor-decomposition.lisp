@@ -871,7 +871,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
     ;; Check no NaN values
     (ok (every (lambda (i)
                  (let ((r (aref residuals i)))
-                   (and (numberp r) (not (sb-ext:float-nan-p r)))))
+                   (and (numberp r) (not (cltd:%float-nan-p r)))))
                '(0 1 2))
         "No NaN values in residuals when x=0 is present")
     ;; The residual for x=0 should be x-hat (non-negative)
@@ -918,7 +918,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
          (kl (cltd:sparse-kl-divergence indices x-values x-hat)))
     (ok (numberp kl)
         "KL divergence is a number")
-    (ok (not (sb-ext:float-nan-p kl))
+    (ok (not (cltd:%float-nan-p kl))
         "KL divergence is not NaN when x contains zero")))
 
 (deftest compute-observation-residuals-zero-x-equals-x-hat
@@ -1028,7 +1028,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
 
 (deftest generate-factor-cards-backward-compatibility-strict
   "generate-factor-cards without :include-diagnostics returns plain list of cards."
-  (let* ((random-state (sb-ext:seed-random-state 42))
+  (let* ((random-state (cltd:%seed-random-state 42))
          (*random-state* random-state))
     (multiple-value-bind (factor-matrices)
         (cltd:decomposition X-shape X-indices-matrix X-value-vector
@@ -1059,7 +1059,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
 
 (deftest generate-factor-cards-kl-contributions-has-normalized
   ":kl_contributions in model_diagnostics should contain normalized shares."
-  (let* ((random-state (sb-ext:seed-random-state 42))
+  (let* ((random-state (cltd:%seed-random-state 42))
          (*random-state* random-state))
     (multiple-value-bind (factor-matrices)
         (cltd:decomposition X-shape X-indices-matrix X-value-vector
@@ -1089,7 +1089,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
 
 (deftest generate-report-artifacts-diagnostics-json-structure
   "generate-report-artifacts with :include-diagnostics t should write proper JSON structure."
-  (let* ((random-state (sb-ext:seed-random-state 42))
+  (let* ((random-state (cltd:%seed-random-state 42))
          (*random-state* random-state))
     (declare (ignorable random-state))
     (multiple-value-bind (factor-matrices)
@@ -1162,7 +1162,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
 
 (deftest single-factor-decomposition
   "Decomposition with R=1 should produce valid single-factor matrices."
-  (let* ((random-state (sb-ext:seed-random-state 42))
+  (let* ((random-state (cltd:%seed-random-state 42))
          (*random-state* random-state))
     (multiple-value-bind (factor-matrices iterations)
         (cltd:decomposition X-shape X-indices-matrix X-value-vector
@@ -1319,7 +1319,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
                               :initial-contents '((1 2))))
          (counts (make-array 1 :element-type 'double-float
                              :initial-contents '(5.0d0)))
-         (random-state (sb-ext:seed-random-state 42))
+         (random-state (cltd:%seed-random-state 42))
          (*random-state* random-state))
     (multiple-value-bind (factor-matrices iterations)
         (cltd:decomposition x-shape indices counts :n-cycle 10 :r 2)
@@ -1339,7 +1339,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
          (kl (cltd:sparse-kl-divergence indices x-values x-hat)))
     (ok (numberp kl)
         "KL divergence is a number")
-    (ok (not (sb-ext:float-nan-p kl))
+    (ok (not (cltd:%float-nan-p kl))
         "KL divergence is not NaN")
     (ok (>= kl 0.0d0)
         "KL divergence is non-negative")))
@@ -1378,7 +1378,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
         "Returns one residual")
     (ok (numberp (aref residuals 0))
         "Residual is a number")
-    (ok (not (sb-ext:float-nan-p (aref residuals 0)))
+    (ok (not (cltd:%float-nan-p (aref residuals 0)))
         "Residual is not NaN")))
 
 ;;; ---------------------------------------------------------------------------
@@ -1396,9 +1396,9 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
          (kl (cltd:sparse-kl-divergence indices x-values x-hat)))
     (ok (numberp kl)
         "KL divergence is a number with large values")
-    (ok (not (sb-ext:float-nan-p kl))
+    (ok (not (cltd:%float-nan-p kl))
         "KL divergence is not NaN with large values")
-    (ok (not (sb-ext:float-infinity-p kl))
+    (ok (not (cltd:%float-infinity-p kl))
         "KL divergence is not Inf with large values")))
 
 (deftest large-values-responsibilities
@@ -1416,9 +1416,9 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
     (loop for obs from 0 below 2 do
       (loop for r from 0 below 2 do
         (let ((val (aref responsibilities obs r)))
-          (ok (not (sb-ext:float-nan-p val))
+          (ok (not (cltd:%float-nan-p val))
               (format nil "Responsibility(~D,~D) is not NaN" obs r))
-          (ok (not (sb-ext:float-infinity-p val))
+          (ok (not (cltd:%float-infinity-p val))
               (format nil "Responsibility(~D,~D) is not Inf" obs r)))))
     ;; Rows should still sum to 1.0
     (loop for obs from 0 below 2 do
@@ -1440,9 +1440,9 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
          (residuals (cltd:compute-observation-residuals
                      factor-matrices indices counts)))
     (loop for i from 0 below 2 do
-      (ok (not (sb-ext:float-nan-p (aref residuals i)))
+      (ok (not (cltd:%float-nan-p (aref residuals i)))
           (format nil "Residual ~D is not NaN" i))
-      (ok (not (sb-ext:float-infinity-p (aref residuals i)))
+      (ok (not (cltd:%float-infinity-p (aref residuals i)))
           (format nil "Residual ~D is not Inf" i)))))
 
 ;;; ---------------------------------------------------------------------------
@@ -1460,7 +1460,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
          (kl (cltd:sparse-kl-divergence indices x-values x-hat)))
     (ok (numberp kl)
         "KL divergence is a number with tiny values")
-    (ok (not (sb-ext:float-nan-p kl))
+    (ok (not (cltd:%float-nan-p kl))
         "KL divergence is not NaN with tiny values")))
 
 (deftest small-factor-values-similarity
@@ -1476,7 +1476,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
     ;; With epsilon protection, should return 0.0 rather than NaN
     (loop for r1 from 0 below 2 do
       (loop for r2 from 0 below 2 do
-        (ok (not (sb-ext:float-nan-p (aref sim-matrix r1 r2)))
+        (ok (not (cltd:%float-nan-p (aref sim-matrix r1 r2)))
             (format nil "Similarity(~D,~D) is not NaN with tiny values" r1 r2))))))
 
 (deftest small-factor-values-responsibilities
@@ -1495,7 +1495,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
     ;; Should fall back to uniform distribution (1/R each)
     (loop for obs from 0 below 2 do
       (loop for r from 0 below 2 do
-        (ok (not (sb-ext:float-nan-p (aref responsibilities obs r)))
+        (ok (not (cltd:%float-nan-p (aref responsibilities obs r)))
             (format nil "Responsibility(~D,~D) is not NaN" obs r)))
       ;; Row should sum to 1.0
       (let ((row-sum (+ (aref responsibilities obs 0) (aref responsibilities obs 1))))
@@ -1514,7 +1514,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
          (factor-matrices (make-array 2 :initial-contents (list mode0 mode1)))
          (sim-matrix (cltd:compute-factor-similarity-matrix factor-matrices)))
     ;; Factor 1 has zero norm, similarity with factor 0 should be 0
-    (ok (not (sb-ext:float-nan-p (aref sim-matrix 0 1)))
+    (ok (not (cltd:%float-nan-p (aref sim-matrix 0 1)))
         "Similarity with zero-column factor is not NaN")
     (ok (< (abs (aref sim-matrix 0 1)) 1.0d-6)
         "Similarity with zero-column factor is 0")))
@@ -1538,7 +1538,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
                      factor-matrices indices counts)))
     ;; When x=0, residual = x-hat (the reconstruction)
     (loop for i from 0 below 2 do
-      (ok (not (sb-ext:float-nan-p (aref residuals i)))
+      (ok (not (cltd:%float-nan-p (aref residuals i)))
           (format nil "Residual ~D is not NaN when count is 0" i))
       (ok (>= (aref residuals i) 0.0d0)
           (format nil "Residual ~D is non-negative when count is 0" i)))))
@@ -1653,10 +1653,13 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
                              :initial-contents '((0 0) (1 1))))
         (values (make-array 2 :element-type 'double-float
                             :initial-contents '(1.0d0 1.0d0))))
-    ;; Create NaN using SBCL's internal function (quiet NaN pattern)
-    (setf (aref values 1) (sb-kernel:make-double-float -524288 0))
+    ;; Create NaN portably
+    (setf (aref values 1)
+          #+sbcl (sb-kernel:make-double-float -524288 0)
+          #-sbcl (- cltd:+double-float-positive-infinity+
+                    cltd:+double-float-positive-infinity+))
     ;; Ensure we have a NaN
-    (when (sb-ext:float-nan-p (aref values 1))
+    (when (cltd:%float-nan-p (aref values 1))
       (let ((caught nil))
         (handler-case
             (cltd:validate-input-data x-shape indices values)
@@ -1674,7 +1677,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
         (values (make-array 1 :element-type 'double-float
                             :initial-contents '(1.0d0))))
     ;; Use SBCL's infinity constant
-    (setf (aref values 0) sb-ext:double-float-positive-infinity)
+    (setf (aref values 0) cltd:+double-float-positive-infinity+)
     (let ((caught nil))
       (handler-case
           (cltd:validate-input-data x-shape indices values)
@@ -1722,7 +1725,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
   "numerical-instability-error is a subtype of tensor-decomposition-error."
   (let ((condition (make-condition 'cltd:numerical-instability-error
                                    :location "test-location"
-                                   :value sb-ext:double-float-positive-infinity
+                                   :value cltd:+double-float-positive-infinity+
                                    :operation "test-op")))
     (ok (typep condition 'cltd:tensor-decomposition-error)
         "numerical-instability-error is a tensor-decomposition-error")

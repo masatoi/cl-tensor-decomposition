@@ -33,6 +33,11 @@
            :convergence-final-kl
            ;; validation
            :validate-input-data
+           ;; portable helpers for testing
+           :%float-nan-p
+           :%float-infinity-p
+           :%seed-random-state
+           :+double-float-positive-infinity+
            ;; diagnostics - factor similarity
            :compute-factor-similarity-matrix
            :extract-similar-factor-pairs
@@ -120,16 +125,56 @@
 ;;; ============================================================
 
 (defun %float-nan-p (x)
-  "Check if X is NaN (Not a Number). Uses SBCL's built-in float-nan-p."
-  (and (floatp x) (sb-ext:float-nan-p x)))
+  "Check if X is NaN (Not a Number). Portable across implementations."
+  (and (floatp x)
+       #+sbcl (sb-ext:float-nan-p x)
+       #+ccl (ccl::nan-or-infinity-p x)
+       #+ecl (ext:float-nan-p x)
+       #+clisp (ext:float-nan-p x)
+       #+allegro (excl:nan-p x)
+       #+lispworks (sys:nan-p x)
+       #-(or sbcl ccl ecl clisp allegro lispworks)
+       (/= x x)))
 
 (defun %float-infinity-p (x)
-  "Check if X is positive or negative infinity."
+  "Check if X is positive or negative infinity. Portable across implementations."
   (and (floatp x)
        (not (%float-nan-p x))
+       #+sbcl (sb-ext:float-infinity-p x)
+       #+ccl (and (ccl::nan-or-infinity-p x) (not (ccl::nan-p x)))
+       #+ecl (ext:float-infinity-p x)
+       #+clisp (ext:float-infinity-p x)
+       #+allegro (excl:infinityp x)
+       #+lispworks (or (sys:infinity-p x) (sys:minus-infinity-p x))
+       #-(or sbcl ccl ecl clisp allegro lispworks)
        (or (> x most-positive-double-float)
            (< x most-negative-double-float))))
 
+(defun %seed-random-state (seed)
+  "Create a random state from an integer SEED. Portable across implementations.
+This allows reproducible random number generation for testing."
+  #+sbcl (sb-ext:seed-random-state seed)
+  #+ccl (ccl::initialize-random-state seed (make-random-state))
+  #+ecl (make-random-state seed)
+  #+clisp (make-random-state seed)
+  #+allegro (make-random-state seed)
+  #+lispworks (make-random-state seed)
+  #-(or sbcl ccl ecl clisp allegro lispworks)
+  (let ((state (make-random-state t)))
+    ;; Fallback: consume some random values based on seed to get different states
+    (dotimes (i (mod seed 1000))
+      (random 1.0d0 state))
+    state))
+
+(defparameter +double-float-positive-infinity+
+  #+sbcl sb-ext:double-float-positive-infinity
+  #+ccl 1d308
+  #+ecl ext:double-float-positive-infinity
+  #+clisp ext:double-float-positive-infinity
+  #+allegro excl:*infinity-double*
+  #+lispworks 1d308
+  #-(or sbcl ccl ecl clisp allegro lispworks) most-positive-double-float
+  "Positive infinity as a double-float. Portable across implementations.")
 (defun validate-input-data (x-shape x-indices-matrix x-value-vector
                             &key (error-on-invalid t))
   "Validate input data for tensor decomposition.

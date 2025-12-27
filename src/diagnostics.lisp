@@ -250,22 +250,33 @@ epsilon, returns a uniform distribution."
 (defun kl-contributions->alist (contributions &key normalize)
   "Convert KL contributions to alist format for JSON export.
 
-If NORMALIZE is true, also includes normalized (proportional) contributions."
+If NORMALIZE is true, also includes normalized (proportional) contributions.
+
+Note: The :total field represents the sum of clamped contributions (negatives
+treated as 0), which is consistent with the normalization basis. The raw
+per-factor contributions are preserved in :contributions for diagnostic purposes."
   (let* ((r (length contributions))
          (contribution-list
            (loop for i from 0 below r
                  collect (list (cons :factor i)
-                               (cons :contribution (round-to (aref contributions i))))))
-         (result (list (cons :contributions contribution-list)
-                       (cons :total (round-to (loop for i from 0 below r
-                                                    sum (aref contributions i)))))))
+                               (cons :contribution
+                                     (round-to (aref contributions i))))))
+         ;; Compute clamped total for consistency with normalize-contributions
+         (clamped-total
+           (loop for i from 0 below r
+                 sum (max 0.0d0 (aref contributions i))))
+         (result
+           (list (cons :contributions contribution-list)
+                 (cons :total (round-to clamped-total)))))
     (when normalize
       (let ((normalized (normalize-contributions contributions)))
-        (push (cons :normalized
-                    (loop for i from 0 below r
-                          collect (list (cons :factor i)
-                                        (cons :share (round-to (aref normalized i))))))
-              result)))
+        (push
+         (cons :normalized
+               (loop for i from 0 below r
+                     collect (list (cons :factor i)
+                                   (cons :share
+                                         (round-to (aref normalized i))))))
+         result)))
     result))
 
 (defun rank-factors-by-contribution (contributions)
