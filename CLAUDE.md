@@ -23,6 +23,9 @@ ros run -l cl-tensor-decomposition-test.asd -e '(asdf:test-system :cl-tensor-dec
 # Run simple example
 ros run -l examples/simple-example.lisp -q
 
+# Lint check (mallet)
+mallet src/*.lisp tests/*.lisp
+
 # From within a REPL
 (asdf:load-system :cl-tensor-decomposition)
 (asdf:test-system :cl-tensor-decomposition)
@@ -66,6 +69,10 @@ Sparse tensors are represented as:
 ## Testing
 
 Tests use Rove with `deftest` forms and `ok` assertions. Test file: `tests/cl-tensor-decomposition.lisp`. Set random seeds when adding randomized tests. Run tests before PRs.
+
+## Linting
+
+Use [mallet](https://github.com/fukamachi/mallet) for static analysis. Run `mallet src/*.lisp tests/*.lisp` before committing. Fix all warnings (unused variables, undefined functions, etc.).
 
 ## Python Usage
 
