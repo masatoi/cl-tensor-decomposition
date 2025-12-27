@@ -25,7 +25,8 @@
                "rove")
   :components ((:module "tests"
                 :components
-                ((:file "cl-tensor-decomposition"))))
+                ((:file "cl-tensor-decomposition")
+                 (:file "integration-test"))))
   :description "Test system for cl-tensor-decomposition"
 
   :perform (test-op (op c) (uiop:symbol-call :rove '#:run c)))

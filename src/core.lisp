@@ -18,6 +18,7 @@
            :write-factor-cards-json
            :write-scenario-report
            :generate-report-artifacts
+           :factor-report-markdown-string
            ;; conditions
            :tensor-decomposition-error
            :invalid-input-error
