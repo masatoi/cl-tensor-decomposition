@@ -135,7 +135,7 @@ Use `select-rank` for k-fold cross-validation over candidate ranks:
   factors)
 ```
 
-`cross-validate-rank` returns detailed fold statistics if you need manual inspection; pass your own evaluation function to use RMSEやMAEなど別指標。
+`cross-validate-rank` returns detailed fold statistics if you need manual inspection; pass your own evaluation function to use RMSE/MAE.
 
 ### Model of a sparse tensor
 A sparse tensor consists of pairs of non-zero values and indices.
