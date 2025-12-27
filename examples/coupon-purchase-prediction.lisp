@@ -331,6 +331,8 @@
 
 (report *result*)
 
+(export-factor-cards-as-json *result* :json-path #P"/tmp/factor_cards.json" :report-path #P"/tmp/factor_report.md")
+
 #|
 === rank=0 ==============================================
 

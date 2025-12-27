@@ -17,7 +17,30 @@
            :generate-factor-cards
            :write-factor-cards-json
            :write-scenario-report
-           :generate-report-artifacts))
+           :generate-report-artifacts
+           ;; diagnostics - factor similarity
+           :compute-factor-similarity-matrix
+           :extract-similar-factor-pairs
+           :similarity-matrix->alist
+           :compute-factor-redundancy-score
+           ;; diagnostics - factor kl contribution
+           :compute-factor-kl-contributions
+           :normalize-contributions
+           :kl-contributions->alist
+           :rank-factors-by-contribution
+           ;; diagnostics - observation responsibilities
+           :compute-observation-responsibilities
+           :compute-responsibility-stats
+           :responsibility-stats->alist
+           :find-ambiguous-observations
+           ;; diagnostics - factor exclusivity
+           :compute-factor-exclusivity
+           :factor-exclusivity->alist
+           ;; diagnostics - per-observation residuals
+           :compute-observation-residuals
+           :compute-residual-stats
+           :residual-stats->alist
+           :find-high-residual-observations))
 
 (in-package :cl-tensor-decomposition)
 
@@ -43,18 +66,22 @@
   matrix)
 
 (defun sparse-kl-divergence (X-indices-matrix X-value-vector X^-value-vector)
-  "Compute the Kullback–Leibler divergence between sparse counts and their approximation."
+  "Compute the Kullback–Leibler divergence between sparse counts and their approximation.
+When x=0, the x*log(x/x^) term contributes 0 (limit as x→0+), so we only add x^ - x = x^."
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array fixnum) X-indices-matrix)
            (type (simple-array double-float) X-value-vector X^-value-vector))
-  (loop for  datum-index fixnum from 0 below (array-dimension X-indices-matrix 0)
-        sum (+ (* (aref X-value-vector datum-index)
-                  (the double-float
-                       (log (/ (aref X-value-vector datum-index)
-                               (+ (aref X^-value-vector datum-index)
-                                  (the double-float *epsilon*))))))
-               (- (aref X-value-vector datum-index))
-               (aref X^-value-vector datum-index))
+  (loop for datum-index fixnum from 0 below (array-dimension X-indices-matrix 0)
+        sum (let ((x (aref X-value-vector datum-index))
+                  (x^ (aref X^-value-vector datum-index)))
+              (if (> x 0.0d0)
+                  ;; Standard KL: x*log(x/x^) - x + x^
+                  (+ (* x (the double-float
+                              (log (/ x (+ x^ (the double-float *epsilon*))))))
+                     (- x)
+                     x^)
+                  ;; When x=0: lim_{x->0+} x*log(x/y) = 0, so just add -x + x^ = x^
+                  x^))
         double-float))
 
 (defun calc-denominator (factor-matrix-vector factor-index denominator-tmp)

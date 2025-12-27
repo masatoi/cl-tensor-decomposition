@@ -364,54 +364,146 @@
                                         0d0)))))))
 
 (defun build-card-alist (factor-index lambda-vector coverage-counts coverage-shares
-                        summaries missing? purchase-bias)
-  (list (cons :factor_id factor-index)
-        (cons :lambda (round-to (aref lambda-vector factor-index)))
-        (cons :coverage (list (cons :count_est (round-to (aref coverage-counts factor-index)))
-                              (cons :share (round-to (aref coverage-shares factor-index)))))
-        (cons :purchase_bias purchase-bias)
-        (cons :salient (summaries->salient-alist summaries))
-        (cons :negatives (summaries->negatives-alist summaries))
-        (cons :coherence (summaries->coherence-alist summaries))
-        (cons :notes (list (cons :missing_labels_ignored missing?)
-                           (cons :discretization (summaries->discretization-alist summaries))))
-        (cons :mode_roles (summaries->role-alist summaries))
-        (cons :mode_summaries summaries)))
+                        summaries missing? purchase-bias
+                        &key kl-contribution contribution-rank)
+  "Build an alist representing a single factor card.
+When KL-CONTRIBUTION is provided, includes :kl_contribution field.
+When CONTRIBUTION-RANK is provided, includes :contribution_rank field."
+  (let ((base-alist
+          (list (cons :factor_id factor-index)
+                (cons :lambda (round-to (aref lambda-vector factor-index)))
+                (cons :coverage (list (cons :count_est (round-to (aref coverage-counts factor-index)))
+                                      (cons :share (round-to (aref coverage-shares factor-index)))))
+                (cons :purchase_bias purchase-bias)
+                (cons :salient (summaries->salient-alist summaries))
+                (cons :negatives (summaries->negatives-alist summaries))
+                (cons :coherence (summaries->coherence-alist summaries))
+                (cons :notes (list (cons :missing_labels_ignored missing?)
+                                   (cons :discretization (summaries->discretization-alist summaries))))
+                (cons :mode_roles (summaries->role-alist summaries))
+                (cons :mode_summaries summaries))))
+    ;; Add diagnostics if provided
+    (when kl-contribution
+      (push (cons :kl_contribution (round-to kl-contribution)) base-alist))
+    (when contribution-rank
+      (push (cons :contribution_rank contribution-rank) base-alist))
+    base-alist))
 
-(defun generate-factor-cards (factor-matrix-vector X-indices-matrix X-value-vector metadata
-                               &key lambda population-marginals
-                                    (target-coverage 0.8d0)
-                                    (epsilon *reporting-epsilon*))
+(defun generate-factor-cards
+       (factor-matrix-vector x-indices-matrix x-value-vector metadata
+        &key lambda population-marginals (target-coverage 0.8d0)
+        (epsilon *reporting-epsilon*) (include-diagnostics nil))
+  "Generate factor cards from decomposition results.
+
+When INCLUDE-DIAGNOSTICS is T, returns an alist with:
+  :model_diagnostics - Model-level diagnostic metrics
+  :factors - List of factor cards (each card includes :kl_contribution)
+
+When INCLUDE-DIAGNOSTICS is NIL (default), returns just the list of factor cards
+for backward compatibility."
   (let* ((mode-specs (ensure-mode-specs metadata factor-matrix-vector)))
     (multiple-value-bind (prob-matrices column-sums)
         (normalize-factor-matrices factor-matrix-vector epsilon)
       (let* ((lambda-vector (compute-lambda-vector column-sums lambda))
-             (marginals (or population-marginals
-                            (estimate-marginals mode-specs X-indices-matrix X-value-vector epsilon)))
-             (lift-matrices (compute-lift-matrices prob-matrices marginals epsilon))
+             (marginals
+              (or population-marginals
+                  (estimate-marginals mode-specs x-indices-matrix
+                   x-value-vector epsilon)))
+             (lift-matrices
+              (compute-lift-matrices prob-matrices marginals epsilon))
              (coherence-vectors (compute-coherence-vectors prob-matrices))
-             (cards '()))
+             (cards 'nil)
+             (kl-contributions nil)
+             (contribution-ranking nil)
+             (model-diagnostics nil))
+        (when include-diagnostics
+          (setf kl-contributions
+                  (compute-factor-kl-contributions factor-matrix-vector
+                   x-indices-matrix x-value-vector :epsilon epsilon))
+          (setf contribution-ranking
+                  (rank-factors-by-contribution kl-contributions))
+          (let* ((x^-value-vector
+                  (make-array (length x-value-vector) :element-type
+                              'double-float :initial-element 0.0d0))
+                 (_
+                  (sdot factor-matrix-vector x-indices-matrix x^-value-vector))
+                 (kl-divergence
+                  (sparse-kl-divergence x-indices-matrix x-value-vector
+                   x^-value-vector))
+                 (similarity-matrix
+                  (compute-factor-similarity-matrix factor-matrix-vector))
+                 (similar-pairs
+                  (extract-similar-factor-pairs similarity-matrix :threshold
+                   0.7d0))
+                 (redundancy-score
+                  (compute-factor-redundancy-score similarity-matrix :threshold
+                   0.7d0))
+                 (responsibilities
+                  (compute-observation-responsibilities factor-matrix-vector
+                   x-indices-matrix :epsilon epsilon))
+                 (responsibility-stats
+                  (responsibility-stats->alist responsibilities
+                   x-value-vector))
+                 (residuals
+                  (compute-observation-residuals factor-matrix-vector
+                   x-indices-matrix x-value-vector :epsilon epsilon))
+                 (residual-stats
+                  (residual-stats->alist residuals x-value-vector)))
+            (declare (ignore _))
+            (multiple-value-bind (exclusivity overlap)
+                (compute-factor-exclusivity responsibilities x-value-vector)
+              (setf model-diagnostics
+                      (list (cons :kl_divergence (round-to kl-divergence 6))
+                            (cons :factor_similarity
+                                  (list (cons :similar_pairs similar-pairs)
+                                        (cons :redundancy_score
+                                              (round-to redundancy-score))))
+                            (cons :exclusivity (round-to exclusivity))
+                            (cons :overlap (round-to overlap))
+                            (cons :responsibility_stats responsibility-stats)
+                            (cons :residual_stats residual-stats)
+                            (cons :kl_contributions
+                                  (kl-contributions->alist
+                                   kl-contributions :normalize t)))))))
         (multiple-value-bind (coverage-counts coverage-shares)
-            (compute-coverage lambda-vector prob-matrices X-indices-matrix X-value-vector)
-          (loop for factor-index from 0 below (length lambda-vector) do
-            (let* ((summaries '())
-                   (missing? nil))
-              (loop for mode-index from 0 below (length mode-specs) do
-                (let* ((summary (build-mode-summary
-                                 (svref mode-specs mode-index)
-                                 (svref prob-matrices mode-index)
-                                 (svref lift-matrices mode-index)
-                                 (aref (svref coherence-vectors mode-index) factor-index)
-                                 factor-index target-coverage)))
-                  (when (summary-ref summary :missing-ignored?)
-                    (setf missing? t))
-                  (push summary summaries)))
-              (setf summaries (nreverse summaries))
-              (let ((purchase-bias (purchase-bias-for-factor summaries mode-specs prob-matrices factor-index)))
-                (push (build-card-alist factor-index lambda-vector coverage-counts coverage-shares
-                                        summaries missing? purchase-bias)
-                      cards))))
-          (nreverse cards))))))
+            (compute-coverage lambda-vector prob-matrices x-indices-matrix
+             x-value-vector)
+          (loop for factor-index from 0 below (length lambda-vector)
+                do (let* ((summaries 'nil) (missing? nil))
+                     (loop for mode-index from 0 below (length mode-specs)
+                           do (let* ((summary
+                                      (build-mode-summary
+                                       (svref mode-specs mode-index)
+                                       (svref prob-matrices mode-index)
+                                       (svref lift-matrices mode-index)
+                                       (aref
+                                        (svref coherence-vectors mode-index)
+                                        factor-index)
+                                       factor-index target-coverage)))
+                                (when (summary-ref summary :missing-ignored?)
+                                  (setf missing? t))
+                                (push summary summaries)))
+                     (setf summaries (nreverse summaries))
+                     (let ((purchase-bias
+                            (purchase-bias-for-factor summaries mode-specs
+                             prob-matrices factor-index)))
+                       (push
+                        (if include-diagnostics
+                            (build-card-alist factor-index lambda-vector
+                             coverage-counts coverage-shares summaries missing?
+                             purchase-bias :kl-contribution
+                             (aref kl-contributions factor-index)
+                             :contribution-rank
+                             (position factor-index contribution-ranking :key
+                                       #'car))
+                            (build-card-alist factor-index lambda-vector
+                             coverage-counts coverage-shares summaries missing?
+                             purchase-bias))
+                        cards))))
+          (if include-diagnostics
+              (list (cons :model_diagnostics model-diagnostics)
+                    (cons :factors (nreverse cards)))
+              (nreverse cards)))))))
 
 (defun write-factor-cards-json (cards path &key serializer)
   (unless serializer
@@ -549,16 +641,29 @@
                                      (epsilon *reporting-epsilon*)
                                      (factor-json-path "factor_cards.json")
                                      (report-path "report.md")
-                                     json-serializer)
-  (let ((cards (generate-factor-cards factor-matrix-vector
-                                      X-indices-matrix
-                                      X-value-vector
-                                      metadata
-                                      :lambda lambda
-                                      :population-marginals population-marginals
-                                      :target-coverage target-coverage
-                                      :epsilon epsilon)))
-    (when json-serializer
-      (write-factor-cards-json cards factor-json-path :serializer json-serializer))
-    (write-scenario-report cards report-path)
-    cards))
+                                     json-serializer
+                                     (include-diagnostics nil))
+  "Generate factor cards, JSON output, and markdown report.
+
+When INCLUDE-DIAGNOSTICS is T, the returned result and JSON output include
+model-level diagnostics (:model_diagnostics) and factor cards with KL contributions.
+
+The markdown report is generated from factor cards only (diagnostics are not
+included in the markdown format)."
+  (let ((result (generate-factor-cards factor-matrix-vector
+                                       X-indices-matrix
+                                       X-value-vector
+                                       metadata
+                                       :lambda lambda
+                                       :population-marginals population-marginals
+                                       :target-coverage target-coverage
+                                       :epsilon epsilon
+                                       :include-diagnostics include-diagnostics)))
+    ;; Extract cards for markdown report (handle both formats)
+    (let ((cards (if include-diagnostics
+                     (cdr (assoc :factors result))
+                     result)))
+      (when json-serializer
+        (write-factor-cards-json result factor-json-path :serializer json-serializer))
+      (write-scenario-report cards report-path)
+      result)))
