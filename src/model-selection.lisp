@@ -1,6 +1,15 @@
 (in-package :cl-tensor-decomposition)
 
 (defun make-fold-splits (indices counts k &key (random-state *random-state*))
+  "Create K randomized fold splits for cross-validation.
+
+INDICES is the sparse tensor index matrix (NNZ x N-MODES).
+COUNTS is the observation count vector (currently unused but kept for API consistency).
+K is the number of folds to create.
+RANDOM-STATE controls the random shuffling for reproducibility.
+
+Returns a list of K sublists, each containing observation indices for that fold.
+The observations are randomly shuffled before splitting to ensure unbiased folds."
   (declare (ignore counts))
   (let* ((nnz (array-dimension indices 0))
          (order (make-array nnz :element-type 'fixnum)))
@@ -19,6 +28,15 @@
                   collect (aref order offset)))))
 
 (defun %subset-tensor (indices counts subset)
+  "Extract a subset of sparse tensor data by observation indices.
+
+INDICES is the full sparse tensor index matrix.
+COUNTS is the full observation count vector.
+SUBSET is a list of observation indices to extract.
+
+Returns two values:
+  1. New index matrix containing only the subset rows
+  2. New count vector containing only the subset values"
   (let* ((subset-size (length subset))
          (dimension (array-dimension indices 1))
          (sub-indices (make-array (list subset-size dimension)
@@ -34,14 +52,30 @@
     (values sub-indices sub-counts)))
 
 (defun %tensor-dimensions (indices)
+  "Compute the maximum index value for each tensor mode.
+
+Returns a list of maximum indices (0-based) observed in each dimension.
+Used internally by %BUILD-SHAPE to infer tensor shape from sparse data."
   (loop for dim from 0 below (array-dimension indices 1)
         collect (loop for row from 0 below (array-dimension indices 0)
                       maximize (aref indices row dim))))
 
 (defun %build-shape (indices)
+  "Infer tensor shape from sparse index matrix.
+
+Returns a list of dimension sizes (1-based) by adding 1 to the maximum
+index observed in each dimension. Note: This may underestimate dimensions
+if some categories are unobserved in the data."
   (mapcar #'1+ (%tensor-dimensions indices)))
 
 (defun %complement-subset (nnz subset)
+  "Compute the complement of a subset of observation indices.
+
+NNZ is the total number of observations.
+SUBSET is a list of indices to exclude.
+
+Returns a list of all indices from 0 to NNZ-1 that are NOT in SUBSET.
+Used to create training sets from validation fold indices."
   (let ((mask (make-array nnz :element-type 'bit :initial-element 0)))
     (dolist (idx subset)
       (setf (aref mask idx) 1))
@@ -53,6 +87,19 @@
                       &key (n-cycle 100) convergence-threshold convergence-window
                            (evaluation-function #'sparse-kl-divergence)
                            verbose)
+  "Evaluate a single fold of cross-validation.
+
+Fits a decomposition model on training data and evaluates it on validation data.
+
+SHAPE is the tensor dimensions.
+TRAIN-INDICES, TRAIN-COUNTS are the training set sparse tensor.
+VALID-INDICES, VALID-COUNTS are the validation set sparse tensor.
+RANK is the number of latent factors to use.
+N-CYCLE, CONVERGENCE-THRESHOLD, CONVERGENCE-WINDOW control decomposition.
+EVALUATION-FUNCTION computes the validation score (default: sparse-kl-divergence).
+VERBOSE controls output during decomposition.
+
+Returns the evaluation score on the validation set."
   (multiple-value-bind (factor-matrix-vector iterations)
       (decomposition shape
                      train-indices
@@ -76,6 +123,25 @@
                                     (evaluation-function #'sparse-kl-divergence)
                                     random-state
                                     verbose)
+  "Perform K-fold cross-validation to evaluate multiple rank values.
+
+INDICES is the sparse tensor index matrix (NNZ x N-MODES).
+COUNTS is the observation count vector.
+RANKS is a list of rank values to evaluate.
+K is the number of cross-validation folds (default 5).
+N-CYCLE, CONVERGENCE-THRESHOLD, CONVERGENCE-WINDOW control decomposition.
+EVALUATION-FUNCTION computes validation score (default: sparse-kl-divergence).
+RANDOM-STATE controls fold randomization for reproducibility.
+VERBOSE controls output during decomposition.
+
+Returns a list of result alists, one per rank, each containing:
+  :rank - the rank value tested
+  :mean - mean validation score across folds
+  :std  - standard deviation of validation scores
+  :scores - list of individual fold scores
+
+Lower mean scores indicate better fit (for KL divergence).
+Progress is printed to *STANDARD-OUTPUT* during execution."
   (let* ((nnz (array-dimension indices 0))
          (shape (%build-shape indices))
          (folds (if random-state
@@ -128,6 +194,24 @@
                              (evaluation-function #'sparse-kl-divergence)
                              random-state
                              verbose)
+  "Select the best rank for tensor decomposition via cross-validation.
+
+This is a convenience wrapper around CROSS-VALIDATE-RANK that returns
+the rank with the lowest mean validation score.
+
+INDICES is the sparse tensor index matrix (NNZ x N-MODES).
+COUNTS is the observation count vector.
+RANKS is a list of candidate rank values to evaluate.
+Other parameters are passed through to CROSS-VALIDATE-RANK.
+
+Returns two values:
+  1. The result alist for the best rank (lowest mean validation score)
+  2. The complete list of all cross-validation results
+
+Example:
+  (select-rank indices counts '(2 3 4 5) :k 5 :n-cycle 50)
+  => ((:rank . 3) (:mean . 0.123) (:std . 0.015) (:scores . (...)))
+     (((:rank . 2) ...) ((:rank . 3) ...) ...)"
   (let* ((cv-key-args (list :k k
                             :n-cycle n-cycle
                             :convergence-threshold convergence-threshold

@@ -236,71 +236,108 @@ When x=0, the x*log(x/x^) term contributes 0 (limit as x→0+), so we only add x
         double-float))
 
 (defun calc-denominator (factor-matrix-vector factor-index denominator-tmp)
+  "Compute the normalization denominator for multiplicative update.
+
+For each latent factor r, accumulates the product of column sums from all
+factor matrices except the one at FACTOR-INDEX. This is used to normalize
+the update step in the MU algorithm.
+
+FACTOR-MATRIX-VECTOR - Vector of factor matrices (one per mode)
+FACTOR-INDEX         - Index of the mode being updated (excluded from product)
+DENOMINATOR-TMP      - Output array to store denominator values, shape (n-modes, rank)"
   (declare (optimize (speed 3) (safety 0))
            (type simple-array factor-matrix-vector)
            (type (simple-array double-float) denominator-tmp)
            (type fixnum factor-index))
   (loop for other-factor-index fixnum from 0 below (length factor-matrix-vector)
-        if (not (= factor-index other-factor-index)) do
-          (let ((factor-matrix (svref factor-matrix-vector other-factor-index)))
-            (declare (type (simple-array double-float) factor-matrix))
-            (loop for ri fixnum from 0 below (array-dimension factor-matrix 1) do
-              (setf (aref denominator-tmp factor-index ri)
-                    (* (aref denominator-tmp factor-index ri)
-                       (loop for i fixnum from 0 below (array-dimension factor-matrix 0)
-                             sum (aref factor-matrix i ri) double-float)))))))
+        if (not (= factor-index other-factor-index))
+        do (let ((factor-matrix (svref factor-matrix-vector other-factor-index)))
+             (declare (type (simple-array double-float) factor-matrix))
+             (loop for ri fixnum from 0 below (array-dimension factor-matrix 1)
+                   do (setf (aref denominator-tmp factor-index ri)
+                            (* (aref denominator-tmp factor-index ri)
+                               (loop for i fixnum from 0 below (array-dimension factor-matrix 0)
+                                     sum (aref factor-matrix i ri) double-float)))))))
 
-(defun calc-numerator (X-indices-matrix X-value-vector X^-value-vector
-                       factor-matrix-vector factor-index numerator-tmp)
+(defun calc-numerator (x-indices-matrix x-value-vector x^-value-vector
+                        factor-matrix-vector factor-index numerator-tmp)
+  "Compute the numerator for multiplicative update of a factor matrix.
+
+For each observation and latent factor r, computes the weighted contribution
+based on the ratio x/x^ and the product of factor values from other modes.
+This implements the numerator term of the MU update rule for KL divergence
+minimization.
+
+X-INDICES-MATRIX     - Sparse tensor indices, shape (nnz, n-modes)
+X-VALUE-VECTOR       - Observed counts at each index
+X^-VALUE-VECTOR      - Reconstructed values at each index
+FACTOR-MATRIX-VECTOR - Vector of factor matrices
+FACTOR-INDEX         - Index of the mode being updated
+NUMERATOR-TMP        - Output vector of arrays to accumulate numerator values"
   (declare (optimize (speed 3) (safety 0))
-           (type (simple-array fixnum) X-indices-matrix)
-           (type (simple-array double-float) X-value-vector X^-value-vector)
+           (type (simple-array fixnum) x-indices-matrix)
+           (type (simple-array double-float) x-value-vector x^-value-vector)
            (type simple-array factor-matrix-vector)
            (type fixnum factor-index))
-  (loop for datum-index fixnum from 0 below (array-dimension X-indices-matrix 0) do
-    (let ((x/x^ (/ (aref X-value-vector datum-index)
-                   (+ (aref X^-value-vector datum-index)
-                      (the double-float *epsilon*)))))
-      (declare (type double-float x/x^))
-      (let ((numerator-tmp-elem (svref numerator-tmp factor-index)))
-        (declare (type (simple-array double-float) numerator-tmp-elem))
-        (loop for ri fixnum from 0 below (array-dimension numerator-tmp-elem 1) do
-          (let ((factor-prod 1.0d0))
-            (declare (type double-float factor-prod))
-            (loop for other-factor-index fixnum from 0 below (length factor-matrix-vector)
-                  if (not (= factor-index other-factor-index)) do
-                    (let ((factor-matrix (svref factor-matrix-vector other-factor-index)))
-                      (declare (type (simple-array double-float) factor-matrix))
-                      (setf factor-prod
-                            (* factor-prod
-                               (aref factor-matrix
-                                     (aref X-indices-matrix datum-index other-factor-index)
-                                     ri)))))
-            (incf (aref numerator-tmp-elem (aref X-indices-matrix datum-index factor-index) ri)
-                  (* x/x^ factor-prod))))))))
+  (loop for datum-index fixnum from 0 below (array-dimension x-indices-matrix 0)
+        do (let ((x/x^ (/ (aref x-value-vector datum-index)
+                          (+ (aref x^-value-vector datum-index)
+                             (the double-float *epsilon*)))))
+             (declare (type double-float x/x^))
+             (let ((numerator-tmp-elem (svref numerator-tmp factor-index)))
+               (declare (type (simple-array double-float) numerator-tmp-elem))
+               (loop for ri fixnum from 0 below (array-dimension numerator-tmp-elem 1)
+                     do (let ((factor-prod 1.0d0))
+                          (declare (type double-float factor-prod))
+                          (loop for other-factor-index fixnum from 0 below (length factor-matrix-vector)
+                                if (not (= factor-index other-factor-index))
+                                do (let ((factor-matrix (svref factor-matrix-vector other-factor-index)))
+                                     (declare (type (simple-array double-float) factor-matrix))
+                                     (setf factor-prod
+                                           (* factor-prod
+                                              (aref factor-matrix
+                                                    (aref x-indices-matrix datum-index other-factor-index)
+                                                    ri)))))
+                          (incf (aref numerator-tmp-elem
+                                      (aref x-indices-matrix datum-index factor-index)
+                                      ri)
+                                (* x/x^ factor-prod))))))))
 
-(defun update (X-indices-matrix X-value-vector X^-value-vector
+(defun update (x-indices-matrix x-value-vector x^-value-vector
                factor-matrix-vector factor-index numerator-tmp denominator-tmp)
+  "Perform one multiplicative update step for a single factor matrix.
+
+Updates the factor matrix at FACTOR-INDEX in place using the multiplicative
+update rule: A_new = A_old * (numerator / denominator). This is the core
+step of the MU algorithm for non-negative tensor decomposition with KL
+divergence objective.
+
+X-INDICES-MATRIX     - Sparse tensor indices
+X-VALUE-VECTOR       - Observed counts
+X^-VALUE-VECTOR      - Current reconstructed values
+FACTOR-MATRIX-VECTOR - Vector of factor matrices (modified in place)
+FACTOR-INDEX         - Index of the mode to update
+NUMERATOR-TMP        - Temporary storage for numerator computation
+DENOMINATOR-TMP      - Temporary storage for denominator computation"
   (declare (optimize (speed 3) (safety 0))
-           (type (simple-array fixnum) X-indices-matrix)
-           (type (simple-array double-float) X-value-vector X^-value-vector denominator-tmp)
+           (type (simple-array fixnum) x-indices-matrix)
+           (type (simple-array double-float) x-value-vector x^-value-vector denominator-tmp)
            (type fixnum factor-index))
   (initialize-matrix (svref numerator-tmp factor-index) 0.0d0)
   (initialize-matrix denominator-tmp 1.0d0)
   (calc-denominator factor-matrix-vector factor-index denominator-tmp)
-  (calc-numerator X-indices-matrix X-value-vector X^-value-vector
+  (calc-numerator x-indices-matrix x-value-vector x^-value-vector
                   factor-matrix-vector factor-index numerator-tmp)
-
   (let ((factor-matrix (svref factor-matrix-vector factor-index))
         (numerator-tmp-elem (svref numerator-tmp factor-index)))
     (declare (type (simple-array double-float) factor-matrix numerator-tmp-elem))
-    (loop for i from 0 below (array-dimension factor-matrix 0) do
-      (loop for ri from 0 below (array-dimension factor-matrix 1) do
-        (setf (aref factor-matrix i ri)
-              (* (aref factor-matrix i ri)
-                 (/ (aref numerator-tmp-elem i ri)
-                    (+ (aref denominator-tmp factor-index ri)
-                       (the double-float *epsilon*)))))))))
+    (loop for i from 0 below (array-dimension factor-matrix 0)
+          do (loop for ri from 0 below (array-dimension factor-matrix 1)
+                   do (setf (aref factor-matrix i ri)
+                            (* (aref factor-matrix i ri)
+                               (/ (aref numerator-tmp-elem i ri)
+                                  (+ (aref denominator-tmp factor-index ri)
+                                     (the double-float *epsilon*)))))))))
 
 (defun sdot (factor-matrix-vector X-indices-matrix X^-value-vector)
   "Reconstruct sparse observations into X^-VALUE-VECTOR using FACTOR-MATRIX-VECTOR."

@@ -3,12 +3,16 @@
 (defparameter *reporting-epsilon* 1.0d-8)
 
 (defun %normalize-mode-name (name)
+  "Convert NAME to a normalized string representation for mode names.
+Symbols are downcased, strings pass through unchanged, other types are printed."
   (typecase name
     (string name)
     (symbol (string-downcase (symbol-name name)))
     (t (princ-to-string name))))
 
 (defun %normalize-label (value)
+  "Convert VALUE to a normalized string representation for category labels.
+Handles strings, symbols (downcased), numbers, and characters."
   (typecase value
     (string value)
     (symbol (string-downcase (symbol-name value)))
@@ -17,7 +21,9 @@
     (t (princ-to-string value))))
 
 (defun round-to (value &optional (decimals 3))
-  (let* ((factor (expt 10d0 decimals))
+  "Round VALUE to the specified number of DECIMALS places.
+Returns a double-float rounded to the nearest 10^-DECIMALS."
+  (let* ((factor (expt 10.0d0 decimals))
          (rounded (/ (round (* value factor)) factor)))
     (coerce rounded 'double-float)))
 
@@ -104,146 +110,198 @@
     specs))
 
 (defun normalize-factor-matrices (factor-matrix-vector epsilon)
+  "Normalize factor matrices so each column sums to 1 (probability distribution).
+
+Returns two values:
+1. Vector of normalized matrices where each column represents P(category|factor)
+2. Vector of column-sum vectors (pre-normalization sums used for lambda computation)
+
+FACTOR-MATRIX-VECTOR - Vector of factor matrices from decomposition
+EPSILON              - Minimum column sum to prevent division by zero"
   (let* ((num-modes (length factor-matrix-vector))
          (normalized (make-array num-modes))
          (column-sums (make-array num-modes)))
-    (loop for mode-index from 0 below num-modes do
-      (let* ((matrix (svref factor-matrix-vector mode-index))
-             (rows (array-dimension matrix 0))
-             (cols (array-dimension matrix 1))
-             (normalized-matrix (make-array (array-dimensions matrix)
-                                            :element-type 'double-float))
-             (sums (make-array cols :element-type 'double-float)))
-        (loop for r from 0 below cols do
-          (let ((sum 0d0))
-            (loop for i from 0 below rows do
-              (let ((value (coerce (aref matrix i r) 'double-float)))
-                (setf (aref normalized-matrix i r) value)
-                (incf sum value)))
-            (setf sum (if (> sum 0d0) sum epsilon))
-            (setf (aref sums r) sum)
-            (loop for i from 0 below rows do
-              (setf (aref normalized-matrix i r)
-                    (/ (aref normalized-matrix i r) sum)))))
-        (setf (svref normalized mode-index) normalized-matrix)
-        (setf (svref column-sums mode-index) sums)))
+    (loop for mode-index from 0 below num-modes
+          do (let* ((matrix (svref factor-matrix-vector mode-index))
+                    (rows (array-dimension matrix 0))
+                    (cols (array-dimension matrix 1))
+                    (normalized-matrix
+                     (make-array (array-dimensions matrix) :element-type 'double-float))
+                    (sums (make-array cols :element-type 'double-float)))
+               (loop for r from 0 below cols
+                     do (let ((sum 0.0d0))
+                          (loop for i from 0 below rows
+                                do (let ((value (coerce (aref matrix i r) 'double-float)))
+                                     (setf (aref normalized-matrix i r) value)
+                                     (incf sum value)))
+                          (setf sum (if (> sum 0.0d0) sum epsilon))
+                          (setf (aref sums r) sum)
+                          (loop for i from 0 below rows
+                                do (setf (aref normalized-matrix i r)
+                                         (/ (aref normalized-matrix i r) sum)))))
+               (setf (svref normalized mode-index) normalized-matrix)
+               (setf (svref column-sums mode-index) sums)))
     (values normalized column-sums)))
 
 (defun compute-lambda-vector (column-sums &optional lambda)
+  "Compute the lambda vector representing overall factor weights.
+
+Lambda for each factor r is the product of column sums across all modes,
+optionally scaled by a provided lambda vector. This represents the total
+'mass' or importance of each latent factor.
+
+COLUMN-SUMS - Vector of column-sum vectors from normalize-factor-matrices
+LAMBDA      - Optional prior lambda values (vector or list) to scale results"
   (let* ((num-modes (length column-sums))
          (cols (length (svref column-sums 0)))
          (lambda-vector (make-array cols :element-type 'double-float)))
-    (loop for r from 0 below cols do
-      (let ((value (if lambda
-                       (etypecase lambda
-                         (vector (aref lambda r))
-                         (list (nth r lambda)))
-                       1d0)))
-        (loop for mode-index from 0 below num-modes do
-          (setf value (* value (aref (svref column-sums mode-index) r))))
-        (setf (aref lambda-vector r) (coerce value 'double-float))))
+    (loop for r from 0 below cols
+          do (let ((value (if lambda
+                              (etypecase lambda
+                                (vector (aref lambda r))
+                                (list (nth r lambda)))
+                              1.0d0)))
+               (loop for mode-index from 0 below num-modes
+                     do (setf value (* value (aref (svref column-sums mode-index) r))))
+               (setf (aref lambda-vector r) (coerce value 'double-float))))
     lambda-vector))
 
-(defun estimate-marginals (mode-specs X-indices-matrix X-value-vector epsilon)
+(defun estimate-marginals (mode-specs x-indices-matrix x-value-vector epsilon)
+  "Estimate marginal probability distributions for each mode from observed data.
+
+Computes P(category) for each category in each mode by aggregating counts
+from the sparse tensor data. Used as baseline for lift computation.
+
+MODE-SPECS       - Vector of mode-spec structures defining each mode
+X-INDICES-MATRIX - Sparse tensor indices
+X-VALUE-VECTOR   - Observed counts at each index
+EPSILON          - Smoothing constant added to all counts"
   (let* ((num-modes (length mode-specs))
-         (nnz (array-dimension X-indices-matrix 0))
+         (nnz (array-dimension x-indices-matrix 0))
          (totals (make-array num-modes))
-         (total-count 0d0))
-    (loop for mode-index from 0 below num-modes do
-      (let* ((labels (mode-spec-labels (svref mode-specs mode-index)))
-             (counts (make-array (length labels)
-                                 :element-type 'double-float
-                                 :initial-element 0d0)))
-        (setf (svref totals mode-index) counts)))
-    (loop for row from 0 below nnz do
-      (let ((count (coerce (aref X-value-vector row) 'double-float)))
-        (incf total-count count)
-        (loop for mode-index from 0 below num-modes do
-          (let ((idx (aref X-indices-matrix row mode-index)))
-            (incf (aref (svref totals mode-index) idx) count)))))
-    (loop for mode-index from 0 below num-modes do
-      (let* ((counts (svref totals mode-index))
-             (length (length counts))
-             (sum 0d0))
-        (loop for i from 0 below length do
-          (incf (aref counts i) epsilon)
-          (incf sum (aref counts i)))
-        (loop for i from 0 below length do
-          (setf (aref counts i) (if (> sum 0d0)
-                                    (/ (aref counts i) sum)
-                                    (/ 1d0 length))))))
+         (total-count 0.0d0))
+    (loop for mode-index from 0 below num-modes
+          do (let* ((labels (mode-spec-labels (svref mode-specs mode-index)))
+                    (counts (make-array (length labels)
+                                        :element-type 'double-float
+                                        :initial-element 0.0d0)))
+               (setf (svref totals mode-index) counts)))
+    (loop for row from 0 below nnz
+          do (let ((count (coerce (aref x-value-vector row) 'double-float)))
+               (incf total-count count)
+               (loop for mode-index from 0 below num-modes
+                     do (let ((idx (aref x-indices-matrix row mode-index)))
+                          (incf (aref (svref totals mode-index) idx) count)))))
+    (loop for mode-index from 0 below num-modes
+          do (let* ((counts (svref totals mode-index))
+                    (length (length counts))
+                    (sum 0.0d0))
+               (loop for i from 0 below length
+                     do (incf (aref counts i) epsilon)
+                        (incf sum (aref counts i)))
+               (loop for i from 0 below length
+                     do (setf (aref counts i)
+                              (if (> sum 0.0d0)
+                                  (/ (aref counts i) sum)
+                                  (/ 1.0d0 length))))))
     totals))
 
 (defun compute-lift-matrices (prob-matrices marginals epsilon)
+  "Compute lift matrices comparing factor probabilities to marginal baselines.
+
+Lift(category, factor) = P(category|factor) / P(category)
+Values > 1 indicate the category is over-represented in the factor.
+Values < 1 indicate the category is under-represented.
+
+PROB-MATRICES - Vector of normalized probability matrices
+MARGINALS     - Vector of marginal probability vectors from estimate-marginals
+EPSILON       - Minimum marginal probability to prevent division by zero"
   (let* ((num-modes (length prob-matrices))
          (lift-matrices (make-array num-modes)))
-    (loop for mode-index from 0 below num-modes do
-      (let* ((prob (svref prob-matrices mode-index))
-             (rows (array-dimension prob 0))
-             (cols (array-dimension prob 1))
-             (baseline (svref marginals mode-index))
-             (lift (make-array (array-dimensions prob)
-                               :element-type 'double-float)))
-        (loop for r from 0 below cols do
-          (loop for i from 0 below rows do
-            (let ((base (max epsilon (aref baseline i)))
-                  (p (aref prob i r)))
-              (setf (aref lift i r) (/ p base)))))
-        (setf (svref lift-matrices mode-index) lift)))
+    (loop for mode-index from 0 below num-modes
+          do (let* ((prob (svref prob-matrices mode-index))
+                    (rows (array-dimension prob 0))
+                    (cols (array-dimension prob 1))
+                    (baseline (svref marginals mode-index))
+                    (lift (make-array (array-dimensions prob)
+                                      :element-type 'double-float)))
+               (loop for r from 0 below cols
+                     do (loop for i from 0 below rows
+                              do (let ((base (max epsilon (aref baseline i)))
+                                       (p (aref prob i r)))
+                                   (setf (aref lift i r) (/ p base)))))
+               (setf (svref lift-matrices mode-index) lift)))
     lift-matrices))
 
 (defun compute-coherence-vectors (prob-matrices)
+  "Compute coherence scores measuring how concentrated each factor is.
+
+Coherence = 1 - H(p) / log(n) where H is entropy.
+A coherence of 1 means the factor assigns all probability to one category.
+A coherence of 0 means uniform distribution across all categories.
+
+PROB-MATRICES - Vector of normalized probability matrices"
   (let* ((num-modes (length prob-matrices))
          (coherence (make-array num-modes)))
-    (loop for mode-index from 0 below num-modes do
-      (let* ((matrix (svref prob-matrices mode-index))
-             (rows (array-dimension matrix 0))
-             (cols (array-dimension matrix 1))
-             (coherence-vector (make-array cols :element-type 'double-float)))
-        (if (<= rows 1)
-            (loop for r from 0 below cols do
-              (setf (aref coherence-vector r) 1d0))
-            (let ((log-dim (log (coerce rows 'double-float))))
-              (loop for r from 0 below cols do
-                (let ((entropy 0d0))
-                  (loop for i from 0 below rows do
-                    (let ((p (aref matrix i r)))
-                      (when (> p 0d0)
-                        (decf entropy (* p (log p))))))
-                  (setf (aref coherence-vector r)
-                        (max 0d0 (- 1d0 (/ entropy log-dim))))))))
-        (setf (svref coherence mode-index) coherence-vector)))
+    (loop for mode-index from 0 below num-modes
+          do (let* ((matrix (svref prob-matrices mode-index))
+                    (rows (array-dimension matrix 0))
+                    (cols (array-dimension matrix 1))
+                    (coherence-vector (make-array cols :element-type 'double-float)))
+               (if (<= rows 1)
+                   (loop for r from 0 below cols
+                         do (setf (aref coherence-vector r) 1.0d0))
+                   (let ((log-dim (log (coerce rows 'double-float))))
+                     (loop for r from 0 below cols
+                           do (let ((entropy 0.0d0))
+                                (loop for i from 0 below rows
+                                      do (let ((p (aref matrix i r)))
+                                           (when (> p 0.0d0)
+                                             (decf entropy (* p (log p))))))
+                                (setf (aref coherence-vector r)
+                                      (max 0.0d0 (- 1.0d0 (/ entropy log-dim))))))))
+               (setf (svref coherence mode-index) coherence-vector)))
     coherence))
 
-(defun compute-coverage (lambda-vector prob-matrices X-indices-matrix X-value-vector)
-  (let* ((nnz (array-dimension X-indices-matrix 0))
+(defun compute-coverage (lambda-vector prob-matrices x-indices-matrix x-value-vector)
+  "Compute how much of the observed data each factor explains (soft assignment).
+
+For each observation, computes responsibility (posterior probability) of each
+factor, then aggregates weighted counts. Returns three values:
+1. counts  - Estimated count explained by each factor
+2. shares  - Proportion of total data explained by each factor (sums to 1)
+3. total   - Total observed count
+
+LAMBDA-VECTOR    - Factor weight vector
+PROB-MATRICES    - Vector of normalized probability matrices
+X-INDICES-MATRIX - Sparse tensor indices
+X-VALUE-VECTOR   - Observed counts"
+  (let* ((nnz (array-dimension x-indices-matrix 0))
          (num-modes (length prob-matrices))
          (cols (length lambda-vector))
-         (counts (make-array cols :element-type 'double-float :initial-element 0d0))
+         (counts (make-array cols :element-type 'double-float :initial-element 0.0d0))
          (scores (make-array cols :element-type 'double-float))
-         (total 0d0))
-    (loop for row from 0 below nnz do
-      (let ((count (coerce (aref X-value-vector row) 'double-float))
-            (denominator 0d0))
-        (incf total count)
-        (loop for r from 0 below cols do
-          (let ((score (aref lambda-vector r)))
-            (loop for mode-index from 0 below num-modes do
-              (let* ((index (aref X-indices-matrix row mode-index))
-                     (matrix (svref prob-matrices mode-index)))
-                (setf score (* score (aref matrix index r)))))
-            (setf (aref scores r) score)
-            (incf denominator score)))
-        (when (> denominator 0d0)
-          (loop for r from 0 below cols do
-            (let ((resp (/ (aref scores r) denominator)))
-              (incf (aref counts r) (* count resp)))))))
+         (total 0.0d0))
+    (loop for row from 0 below nnz
+          do (let ((count (coerce (aref x-value-vector row) 'double-float))
+                   (denominator 0.0d0))
+               (incf total count)
+               (loop for r from 0 below cols
+                     do (let ((score (aref lambda-vector r)))
+                          (loop for mode-index from 0 below num-modes
+                                do (let* ((index (aref x-indices-matrix row mode-index))
+                                          (matrix (svref prob-matrices mode-index)))
+                                     (setf score (* score (aref matrix index r)))))
+                          (setf (aref scores r) score)
+                          (incf denominator score)))
+               (when (> denominator 0.0d0)
+                 (loop for r from 0 below cols
+                       do (let ((resp (/ (aref scores r) denominator)))
+                            (incf (aref counts r) (* count resp)))))))
     (let ((shares (make-array cols :element-type 'double-float)))
-      (loop for r from 0 below cols do
-        (setf (aref shares r)
-              (if (> total 0d0)
-                  (/ (aref counts r) total)
-                  0d0)))
+      (loop for r from 0 below cols
+            do (setf (aref shares r)
+                     (if (> total 0.0d0) (/ (aref counts r) total) 0.0d0)))
       (values counts shares total))))
 
 (defun salient-entry->alist (label prob lift)
@@ -506,12 +564,18 @@ for backward compatibility."
               (nreverse cards)))))))
 
 (defun write-factor-cards-json (cards path &key serializer)
+  "Write factor cards to a JSON file using the provided serializer.
+
+CARDS      - List of factor card alists from generate-factor-cards
+PATH       - Output file path
+SERIALIZER - Function (cards stream) that writes JSON to the stream"
   (unless serializer
     (error "Provide :serializer function that writes CARDS as JSON to the stream."))
   (let ((pathname (pathname path)))
-    (with-open-file (out pathname :direction :output
-                                  :if-exists :supersede
-                                  :if-does-not-exist :create)
+    (with-open-file (out pathname
+                         :direction :output
+                         :if-exists :supersede
+                         :if-does-not-exist :create)
       (funcall serializer cards out))))
 
 (defun card-ref (card key)
@@ -616,6 +680,12 @@ for backward compatibility."
         "No significant caveats surfaced.")))
 
 (defun factor-report-markdown-string (cards)
+  "Generate a markdown report string from factor cards.
+
+Returns a formatted markdown document with sections for each factor,
+including summary, evidence, recommendations, and caveats.
+
+CARDS - List of factor card alists from generate-factor-cards"
   (with-output-to-string (out)
     (write-string "# Scenario Cards\n\n" out)
     (dolist (card cards)
@@ -629,10 +699,15 @@ for backward compatibility."
       (write-char #\Newline out))))
 
 (defun write-scenario-report (cards path)
+  "Write a markdown scenario report to a file.
+
+CARDS - List of factor card alists from generate-factor-cards
+PATH  - Output file path for the markdown report"
   (let ((pathname (pathname path)))
-    (with-open-file (out pathname :direction :output
-                                  :if-exists :supersede
-                                  :if-does-not-exist :create)
+    (with-open-file (out pathname
+                         :direction :output
+                         :if-exists :supersede
+                         :if-does-not-exist :create)
       (write-string (factor-report-markdown-string cards) out))))
 
 (defun generate-report-artifacts (factor-matrix-vector X-indices-matrix X-value-vector metadata
