@@ -185,7 +185,7 @@
 
 ;; (defun update-A (A B X X^)
 ;;   (do-fast-traversal '
-      
+
 ;;   (w/fast-traversals ((2dmatrix A i j val-a)
 ;;                       (2dmatrix B j k val-b)
 ;;                       (2dmatrix X l m val-b))
@@ -318,17 +318,17 @@
 
 ;; 次の2つが一致することを確認(sparse版がdence版と同じ結果
 (datum-indices-value 0 X-indices-matrix X^-value-vector)
-;; indices: 0 1 
+;; indices: 0 1
 ;; value: 0.49650179820894935d0
 (aref X^ 0 1) ; => 0.49650179820894935d0
 
 (datum-indices-value 1 sparse-X-indices-matrix sparse-X^-value-vector)
-;; indices: 0 81 
+;; indices: 0 81
 ;; value: 0.4839826097016188d0
 (aref X^ 0 81) ; => 0.4839826097016188d0
 
 (datum-indices-value 100 sparse-X-indices-matrix sparse-X^-value-vector)
-;; indices: 2 271 
+;; indices: 2 271
 ;; value: 0.4016027188061294d0
 (aref X^ 2 271) ; => 0.4016027188061294d0
 
@@ -367,7 +367,7 @@
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array fixnum) X-indices-matrix)
            (type (simple-array double-float) X-value-vector X^-value-vector)
-           (type fixnum large-R))  
+           (type fixnum large-R))
   (loop for datum-index fixnum from 0 below (array-dimension X-indices-matrix 0) do
     (let ((x/x^ (/ (aref X-value-vector datum-index) (aref X^-value-vector datum-index))))
       (declare (type double-float x/x^))
@@ -406,7 +406,7 @@
            (type (simple-array fixnum) X-indices-matrix)
            (type (simple-array double-float) X-value-vector X^-value-vector denominator-tmp)
            (type fixnum large-R))
-  
+
   (initialize-matrix denominator-tmp 1d0)
 
   (let ((n-factor (length factor-matrix-vector)))

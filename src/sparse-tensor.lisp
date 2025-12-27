@@ -56,7 +56,7 @@
 
 (defun multiply-sparse-and-dence-tensor (sparse-tensor dence-tensor)
   (maphash (lambda (indices val)
-             
+
   )
 ;; => sparse-tensor (if the element became 0 as a result of multiplication, delete it from hash-teble)
 
