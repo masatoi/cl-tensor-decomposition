@@ -148,8 +148,7 @@
     (ok (>= iterations 3) "At least window iterations executed")))
 
 (deftest make-fold-splits-cover-all-indices
-  (let* ((ranks '(1 2))
-         (random-state (make-random-state t))
+  (let* ((random-state (make-random-state t))
          (splits (cltd:make-fold-splits X-indices-matrix X-value-vector 2
                                         :random-state random-state)))
     (ok (= (length splits) 2) "Two folds generated")
@@ -1557,3 +1556,227 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
     (let ((sum (loop for i from 0 below 4 sum (aref normalized i))))
       (ok (< (abs (- sum 1.0d0)) 1.0d-6)
           "Sum is 1.0"))))
+
+;;; ===========================================================================
+;;; Input Validation Tests
+;;; ===========================================================================
+
+(deftest validate-input-data-accepts-valid-data
+  "validate-input-data returns T for valid input."
+  (let ((x-shape '(2 3 4))
+        (indices (make-array '(3 3) :element-type 'fixnum
+                             :initial-contents '((0 1 0) (1 2 3) (0 0 1))))
+        (values (make-array 3 :element-type 'double-float
+                            :initial-contents '(1.0d0 2.0d0 3.0d0))))
+    (ok (eq t (cltd:validate-input-data x-shape indices values))
+        "Valid data returns T")))
+
+(defun %test-signals-invalid-input-error (thunk message)
+  "Helper to test that THUNK signals invalid-input-error."
+  (let ((caught nil))
+    (handler-case
+        (funcall thunk)
+      (cltd:invalid-input-error (c)
+        (declare (ignore c))
+        (setf caught t)))
+    (ok caught message)))
+
+(deftest validate-input-data-rejects-empty-shape
+  "validate-input-data signals error for empty x-shape."
+  (let ((x-shape '())
+        (indices (make-array '(1 0) :element-type 'fixnum))
+        (values (make-array 1 :element-type 'double-float
+                            :initial-contents '(1.0d0))))
+    (%test-signals-invalid-input-error
+     (lambda () (cltd:validate-input-data x-shape indices values))
+     "Empty x-shape signals invalid-input-error")))
+
+(deftest validate-input-data-rejects-non-positive-dimension
+  "validate-input-data signals error for zero or negative dimension."
+  (let ((x-shape '(2 0 4))
+        (indices (make-array '(1 3) :element-type 'fixnum
+                             :initial-contents '((0 0 0))))
+        (values (make-array 1 :element-type 'double-float
+                            :initial-contents '(1.0d0))))
+    (%test-signals-invalid-input-error
+     (lambda () (cltd:validate-input-data x-shape indices values))
+     "Zero dimension signals invalid-input-error")))
+
+(deftest validate-input-data-rejects-mode-count-mismatch
+  "validate-input-data signals error when mode counts don't match."
+  (let ((x-shape '(2 3))  ; 2 modes
+        (indices (make-array '(1 3) :element-type 'fixnum  ; 3 modes
+                             :initial-contents '((0 0 0))))
+        (values (make-array 1 :element-type 'double-float
+                            :initial-contents '(1.0d0))))
+    (%test-signals-invalid-input-error
+     (lambda () (cltd:validate-input-data x-shape indices values))
+     "Mode count mismatch signals invalid-input-error")))
+
+(deftest validate-input-data-rejects-length-mismatch
+  "validate-input-data signals error when value vector length doesn't match."
+  (let ((x-shape '(2 3))
+        (indices (make-array '(2 2) :element-type 'fixnum
+                             :initial-contents '((0 0) (1 1))))
+        (values (make-array 3 :element-type 'double-float  ; 3 values but 2 observations
+                            :initial-contents '(1.0d0 2.0d0 3.0d0))))
+    (%test-signals-invalid-input-error
+     (lambda () (cltd:validate-input-data x-shape indices values))
+     "Value vector length mismatch signals invalid-input-error")))
+
+(deftest validate-input-data-rejects-out-of-bounds-index
+  "validate-input-data signals error for out-of-bounds indices."
+  (let ((x-shape '(2 3))
+        (indices (make-array '(1 2) :element-type 'fixnum
+                             :initial-contents '((0 5))))  ; 5 >= 3
+        (values (make-array 1 :element-type 'double-float
+                            :initial-contents '(1.0d0))))
+    (%test-signals-invalid-input-error
+     (lambda () (cltd:validate-input-data x-shape indices values))
+     "Out-of-bounds index signals invalid-input-error")))
+
+(deftest validate-input-data-rejects-negative-value
+  "validate-input-data signals error for negative counts."
+  (let ((x-shape '(2 3))
+        (indices (make-array '(1 2) :element-type 'fixnum
+                             :initial-contents '((0 0))))
+        (values (make-array 1 :element-type 'double-float
+                            :initial-contents '(-1.0d0))))
+    (%test-signals-invalid-input-error
+     (lambda () (cltd:validate-input-data x-shape indices values))
+     "Negative value signals invalid-input-error")))
+
+(deftest validate-input-data-rejects-nan-value
+  "validate-input-data signals error for NaN in values."
+  (let ((x-shape '(2 3))
+        (indices (make-array '(2 2) :element-type 'fixnum
+                             :initial-contents '((0 0) (1 1))))
+        (values (make-array 2 :element-type 'double-float
+                            :initial-contents '(1.0d0 1.0d0))))
+    ;; Create NaN using SBCL's internal function (quiet NaN pattern)
+    (setf (aref values 1) (sb-kernel:make-double-float -524288 0))
+    ;; Ensure we have a NaN
+    (when (sb-ext:float-nan-p (aref values 1))
+      (let ((caught nil))
+        (handler-case
+            (cltd:validate-input-data x-shape indices values)
+          (cltd:invalid-input-error (c)
+            (declare (ignore c))
+            (setf caught t)))
+        (ok caught
+            "NaN value signals invalid-input-error")))))
+
+(deftest validate-input-data-rejects-infinite-value
+  "validate-input-data signals error for infinite values."
+  (let ((x-shape '(2 3))
+        (indices (make-array '(1 2) :element-type 'fixnum
+                             :initial-contents '((0 0))))
+        (values (make-array 1 :element-type 'double-float
+                            :initial-contents '(1.0d0))))
+    ;; Use SBCL's infinity constant
+    (setf (aref values 0) sb-ext:double-float-positive-infinity)
+    (let ((caught nil))
+      (handler-case
+          (cltd:validate-input-data x-shape indices values)
+        (cltd:invalid-input-error (c)
+          (declare (ignore c))
+          (setf caught t)))
+      (ok caught
+          "Infinite value signals invalid-input-error"))))
+
+(deftest validate-input-data-non-error-mode
+  "validate-input-data returns multiple values instead of error when error-on-invalid=nil."
+  (let ((x-shape '(2 -1))  ; Invalid: negative dimension
+        (indices (make-array '(1 2) :element-type 'fixnum
+                             :initial-contents '((0 0))))
+        (values (make-array 1 :element-type 'double-float
+                            :initial-contents '(1.0d0))))
+    (multiple-value-bind (valid reason details)
+        (cltd:validate-input-data x-shape indices values :error-on-invalid nil)
+      (ok (null valid)
+          "Returns NIL for invalid data")
+      (ok (eq reason :invalid-shape)
+          "Returns :invalid-shape as reason")
+      (ok (stringp details)
+          "Returns string details"))))
+
+;;; ===========================================================================
+;;; Condition Type Tests
+;;; ===========================================================================
+
+(deftest condition-invalid-input-error-hierarchy
+  "invalid-input-error is a subtype of tensor-decomposition-error."
+  (let ((condition (make-condition 'cltd:invalid-input-error
+                                   :reason :test-reason
+                                   :details "test details")))
+    (ok (typep condition 'cltd:tensor-decomposition-error)
+        "invalid-input-error is a tensor-decomposition-error")
+    (ok (typep condition 'error)
+        "invalid-input-error is an error")
+    (ok (eq (cltd:invalid-input-reason condition) :test-reason)
+        "Reason accessor works")
+    (ok (equal (cltd:invalid-input-details condition) "test details")
+        "Details accessor works")))
+
+(deftest condition-numerical-instability-error-hierarchy
+  "numerical-instability-error is a subtype of tensor-decomposition-error."
+  (let ((condition (make-condition 'cltd:numerical-instability-error
+                                   :location "test-location"
+                                   :value sb-ext:double-float-positive-infinity
+                                   :operation "test-op")))
+    (ok (typep condition 'cltd:tensor-decomposition-error)
+        "numerical-instability-error is a tensor-decomposition-error")
+    (ok (typep condition 'error)
+        "numerical-instability-error is an error")
+    (ok (equal (cltd:instability-location condition) "test-location")
+        "Location accessor works")
+    (ok (equal (cltd:instability-operation condition) "test-op")
+        "Operation accessor works")))
+
+(deftest condition-convergence-failure-error-hierarchy
+  "convergence-failure-error is a subtype of tensor-decomposition-error."
+  (let ((condition (make-condition 'cltd:convergence-failure-error
+                                   :iterations 100
+                                   :final-kl 1.5d0)))
+    (ok (typep condition 'cltd:tensor-decomposition-error)
+        "convergence-failure-error is a tensor-decomposition-error")
+    (ok (typep condition 'error)
+        "convergence-failure-error is an error")
+    (ok (= (cltd:convergence-iterations condition) 100)
+        "Iterations accessor works")
+    (ok (< (abs (- (cltd:convergence-final-kl condition) 1.5d0)) 1.0d-10)
+        "Final-kl accessor works")))
+
+(deftest decomposition-validates-by-default
+  "decomposition validates input by default."
+  (let ((x-shape '(2 3))
+        (indices (make-array '(1 2) :element-type 'fixnum
+                             :initial-contents '((0 5))))  ; Out of bounds
+        (values (make-array 1 :element-type 'double-float
+                            :initial-contents '(1.0d0))))
+    ;; Use handler-case to verify the right condition is raised
+    (let ((caught nil))
+      (handler-case
+          (cltd:decomposition x-shape indices values)
+        (cltd:invalid-input-error (c)
+          (declare (ignore c))
+          (setf caught t)))
+      (ok caught
+          "decomposition signals invalid-input-error for bad input"))))
+
+(deftest decomposition-can-skip-validation
+  "decomposition can skip validation with :validate nil."
+  ;; This test just verifies that :validate nil doesn't cause an error
+  ;; when the data is valid
+  (let ((x-shape '(2 3))
+        (indices (make-array '(1 2) :element-type 'fixnum
+                             :initial-contents '((0 1))))
+        (values (make-array 1 :element-type 'double-float
+                            :initial-contents '(1.0d0))))
+    (multiple-value-bind (factors iterations)
+        (cltd:decomposition x-shape indices values
+                            :n-cycle 5 :r 2 :validate nil)
+      (ok (arrayp factors)
+          "Returns factor matrices with validate=nil")
+      (ok (plusp iterations)
+          "Returns positive iteration count"))))

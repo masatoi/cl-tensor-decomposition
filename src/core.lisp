@@ -18,6 +18,20 @@
            :write-factor-cards-json
            :write-scenario-report
            :generate-report-artifacts
+           ;; conditions
+           :tensor-decomposition-error
+           :invalid-input-error
+           :invalid-input-reason
+           :invalid-input-details
+           :numerical-instability-error
+           :instability-location
+           :instability-value
+           :instability-operation
+           :convergence-failure-error
+           :convergence-iterations
+           :convergence-final-kl
+           ;; validation
+           :validate-input-data
            ;; diagnostics - factor similarity
            :compute-factor-similarity-matrix
            :extract-similar-factor-pairs
@@ -44,6 +58,142 @@
 
 (in-package :cl-tensor-decomposition)
 
+;;; ============================================================
+;;; Condition Types
+;;; ============================================================
+
+(define-condition tensor-decomposition-error (error)
+  ()
+  (:documentation "Base condition for all tensor decomposition errors."))
+
+(define-condition invalid-input-error (tensor-decomposition-error)
+  ((reason :initarg :reason
+           :reader invalid-input-reason
+           :type keyword
+           :documentation "Category of validation failure (e.g., :shape-mismatch, :nan-value)")
+   (details :initarg :details
+            :reader invalid-input-details
+            :initform nil
+            :documentation "Additional context about the validation failure"))
+  (:report (lambda (condition stream)
+             (format stream "Invalid input data: ~A~@[ — ~A~]"
+                     (invalid-input-reason condition)
+                     (invalid-input-details condition))))
+  (:documentation "Signaled when input data fails validation checks."))
+
+(define-condition numerical-instability-error (tensor-decomposition-error)
+  ((location :initarg :location
+             :reader instability-location
+             :documentation "Where the instability was detected (e.g., matrix index or function name)")
+   (value :initarg :value
+          :reader instability-value
+          :documentation "The problematic value (NaN, Inf, or negative)")
+   (operation :initarg :operation
+              :reader instability-operation
+              :initform nil
+              :documentation "The operation that produced the unstable value"))
+  (:report (lambda (condition stream)
+             (format stream "Numerical instability detected at ~A: value=~A~@[ during ~A~]"
+                     (instability-location condition)
+                     (instability-value condition)
+                     (instability-operation condition))))
+  (:documentation "Signaled when NaN, Inf, or unexpected negative values are encountered."))
+
+(define-condition convergence-failure-error (tensor-decomposition-error)
+  ((iterations :initarg :iterations
+               :reader convergence-iterations
+               :type fixnum
+               :documentation "Number of iterations completed before failure")
+   (final-kl :initarg :final-kl
+             :reader convergence-final-kl
+             :type double-float
+             :documentation "Final KL divergence value at failure"))
+  (:report (lambda (condition stream)
+             (format stream "Decomposition failed to converge after ~D iterations (final KL=~,6F)"
+                     (convergence-iterations condition)
+                     (convergence-final-kl condition))))
+  (:documentation "Signaled when decomposition fails to converge within allowed iterations."))
+
+;;; ============================================================
+;;; Input Validation
+;;; ============================================================
+
+(defun %float-nan-p (x)
+  "Check if X is NaN (Not a Number). Uses SBCL's built-in float-nan-p."
+  (and (floatp x) (sb-ext:float-nan-p x)))
+
+(defun %float-infinity-p (x)
+  "Check if X is positive or negative infinity."
+  (and (floatp x)
+       (not (%float-nan-p x))
+       (or (> x most-positive-double-float)
+           (< x most-negative-double-float))))
+
+(defun validate-input-data (x-shape x-indices-matrix x-value-vector
+                            &key (error-on-invalid t))
+  "Validate input data for tensor decomposition.
+
+X-SHAPE          — list of tensor dimensions per mode (must be positive integers).
+X-INDICES-MATRIX — fixnum matrix of non-zero coordinates.
+X-VALUE-VECTOR   — double-float vector of observed counts.
+ERROR-ON-INVALID — if T (default), signal invalid-input-error on failure;
+                   if NIL, return (values nil reason details) instead.
+
+Returns T if validation passes. When ERROR-ON-INVALID is NIL and validation fails,
+returns (values NIL reason details)."
+  (flet ((fail (reason details)
+           (if error-on-invalid
+               (error 'invalid-input-error :reason reason :details details)
+               (return-from validate-input-data (values nil reason details)))))
+    ;; 1. Check x-shape is a non-empty list of positive integers
+    (unless (and (listp x-shape) (plusp (length x-shape)))
+      (fail :invalid-shape "x-shape must be a non-empty list"))
+    (loop for dim in x-shape
+          for mode from 0
+          unless (and (integerp dim) (plusp dim))
+            do (fail :invalid-shape
+                     (format nil "x-shape[~D]=~S must be a positive integer" mode dim)))
+    ;; 2. Check x-indices-matrix dimensions
+    (unless (and (arrayp x-indices-matrix)
+                 (= 2 (array-rank x-indices-matrix)))
+      (fail :invalid-indices-matrix "x-indices-matrix must be a 2D array"))
+    (let ((nnz (array-dimension x-indices-matrix 0))
+          (n-modes (array-dimension x-indices-matrix 1)))
+      (unless (= n-modes (length x-shape))
+        (fail :mode-count-mismatch
+              (format nil "x-indices-matrix has ~D columns but x-shape has ~D modes"
+                      n-modes (length x-shape))))
+      ;; 3. Check x-value-vector length matches
+      (unless (and (vectorp x-value-vector)
+                   (= (length x-value-vector) nnz))
+        (fail :value-vector-length-mismatch
+              (format nil "x-value-vector length ~D does not match nnz ~D"
+                      (length x-value-vector) nnz)))
+      ;; 4. Check indices are within bounds and values are valid
+      (loop for datum-index from 0 below nnz
+            do
+               ;; Check each index is in range
+               (loop for mode from 0 below n-modes
+                     for idx = (aref x-indices-matrix datum-index mode)
+                     for dim = (nth mode x-shape)
+                     unless (and (integerp idx) (<= 0 idx) (< idx dim))
+                       do (fail :index-out-of-bounds
+                                (format nil "index[~D,~D]=~S out of bounds [0,~D)"
+                                        datum-index mode idx dim)))
+               ;; Check value is valid (non-negative, not NaN/Inf)
+               (let ((val (aref x-value-vector datum-index)))
+                 (cond
+                   ((%float-nan-p val)
+                    (fail :nan-value
+                          (format nil "x-value-vector[~D] is NaN" datum-index)))
+                   ((%float-infinity-p val)
+                    (fail :infinite-value
+                          (format nil "x-value-vector[~D] is infinite" datum-index)))
+                   ((< val 0.0d0)
+                    (fail :negative-value
+                          (format nil "x-value-vector[~D]=~F is negative"
+                                  datum-index val)))))))
+    t))
 (defparameter *epsilon* 0.000001d0)
 
 (defun initialize-matrix (matrix default-value)
@@ -219,9 +369,10 @@ When x=0, the x*log(x/x^) term contributes 0 (limit as x→0+), so we only add x
                 (setf last-smooth smooth))))))
       (values n-cycle))))
 
-(defun decomposition (X-shape X-indices-matrix X-value-vector
-                      &key (n-cycle 100) (R 20) verbose
-                      convergence-threshold convergence-window)
+(defun decomposition
+       (x-shape x-indices-matrix x-value-vector
+        &key (n-cycle 100) (r 20) verbose convergence-threshold
+        convergence-window (validate t))
   "Run multiplicative-update tensor decomposition on sparse data.
 
 X-SHAPE       — list of tensor dimensions per mode.
@@ -234,34 +385,39 @@ CONVERGENCE-THRESHOLD — optional double-float tolerance on the relative change
                         successive smoothed KL averages (e.g., 1d-3 ≈ 0.1% change).
 CONVERGENCE-WINDOW   — length (positive integer) of the smoothing window; defaults to 5 when
                         CONVERGENCE-THRESHOLD is provided, otherwise ignored.
+VALIDATE      — when true (default), validate input data before decomposition;
+                signals invalid-input-error if validation fails.
 
 Returns the factor-matrix vector and the number of iterations actually executed."
-  (let ((X^-value-vector (make-array (length X-value-vector)
-                                     :element-type 'double-float
-                                     :initial-element 1.0d0))
+  ;; Validate input data if requested
+  (when validate
+    (validate-input-data x-shape x-indices-matrix x-value-vector))
+  (let ((x^-value-vector
+         (make-array (length x-value-vector) :element-type 'double-float
+                     :initial-element 1.0d0))
         (factor-matrix-vector
-          (make-array (array-dimension X-indices-matrix 1)
-                      :initial-contents
-                      (loop for dim from 0 below (array-dimension X-indices-matrix 1)
-                            collect (make-array (list (nth dim X-shape) R)
-                                                :element-type 'double-float))))
+         (make-array (array-dimension x-indices-matrix 1) :initial-contents
+                     (loop for dim from 0 below (array-dimension
+                                                 x-indices-matrix 1)
+                           collect (make-array (list (nth dim x-shape) r)
+                                               :element-type 'double-float))))
         (numerator-tmp
-          (make-array (array-dimension X-indices-matrix 1)
-                      :initial-contents
-                      (loop for dim from 0 below (array-dimension X-indices-matrix 1)
-                            collect (make-array (list (nth dim X-shape) R)
-                                                :element-type 'double-float :initial-element 0.0d0))))
-        (denominator-tmp (make-array (list (array-dimension X-indices-matrix 1) R)
-                                     :element-type 'double-float
-                                     :initial-element 1.0d0)))
-    (loop for factor-matrix across factor-matrix-vector do
-      (initialize-random-matrix factor-matrix))
+         (make-array (array-dimension x-indices-matrix 1) :initial-contents
+                     (loop for dim from 0 below (array-dimension
+                                                 x-indices-matrix 1)
+                           collect (make-array (list (nth dim x-shape) r)
+                                               :element-type 'double-float
+                                               :initial-element 0.0d0))))
+        (denominator-tmp
+         (make-array (list (array-dimension x-indices-matrix 1) r)
+                     :element-type 'double-float :initial-element 1.0d0)))
+    (loop for factor-matrix across factor-matrix-vector
+          do (initialize-random-matrix factor-matrix))
     (multiple-value-bind (iterations)
-        (decomposition-inner n-cycle X-indices-matrix X-value-vector X^-value-vector
-                             factor-matrix-vector numerator-tmp denominator-tmp
-                             :verbose verbose
-                             :convergence-threshold convergence-threshold
-                             :convergence-window convergence-window)
+        (decomposition-inner n-cycle x-indices-matrix x-value-vector
+         x^-value-vector factor-matrix-vector numerator-tmp denominator-tmp
+         :verbose verbose :convergence-threshold convergence-threshold
+         :convergence-window convergence-window)
       (values factor-matrix-vector iterations))))
 
 (defun ranking (label-list factor-matrix r)
