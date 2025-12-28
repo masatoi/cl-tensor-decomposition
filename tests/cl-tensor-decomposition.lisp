@@ -1979,3 +1979,132 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
             (setf caught t)))
         (ok caught
             "make-sparse-tensor signals invalid-input-error for too many domains")))))
+
+(deftest sparse-tensor-nnz-returns-correct-count
+  "sparse-tensor-nnz returns the number of non-zero entries."
+  ;; x-tensor has 3 non-zero entries (defined at top of file)
+  (ok (= 3 (cltd:sparse-tensor-nnz x-tensor))
+      "sparse-tensor-nnz returns 3 for x-tensor"))
+
+(deftest sparse-tensor-nnz-empty-tensor
+  "sparse-tensor-nnz returns 0 for an empty tensor."
+  (let* ((shape '(2 3))
+         (indices (make-array '(0 2) :element-type 'fixnum))
+         (values (make-array 0 :element-type 'double-float))
+         (tensor (cltd:make-sparse-tensor shape indices values)))
+    (ok (= 0 (cltd:sparse-tensor-nnz tensor))
+        "sparse-tensor-nnz returns 0 for empty tensor")))
+
+(deftest sparse-tensor-n-modes-2-mode
+  "sparse-tensor-n-modes returns 2 for a 2-mode tensor."
+  (let* ((shape '(2 3))
+         (indices (make-array '(1 2) :element-type 'fixnum
+                              :initial-contents '((0 1))))
+         (values (make-array 1 :element-type 'double-float
+                             :initial-contents '(1.0d0)))
+         (tensor (cltd:make-sparse-tensor shape indices values)))
+    (ok (= 2 (cltd:sparse-tensor-n-modes tensor))
+        "sparse-tensor-n-modes returns 2 for 2-mode tensor")))
+
+(deftest sparse-tensor-n-modes-3-mode
+  "sparse-tensor-n-modes returns 3 for x-tensor (3-mode)."
+  ;; x-tensor has shape (2 3 4)
+  (ok (= 3 (cltd:sparse-tensor-n-modes x-tensor))
+      "sparse-tensor-n-modes returns 3 for x-tensor"))
+
+(deftest sparse-tensor-n-modes-4-mode
+  "sparse-tensor-n-modes returns 4 for a 4-mode tensor."
+  (let* ((shape '(2 3 4 5))
+         (indices (make-array '(1 4) :element-type 'fixnum
+                              :initial-contents '((0 1 2 3))))
+         (values (make-array 1 :element-type 'double-float
+                             :initial-contents '(1.0d0)))
+         (tensor (cltd:make-sparse-tensor shape indices values)))
+    (ok (= 4 (cltd:sparse-tensor-n-modes tensor))
+        "sparse-tensor-n-modes returns 4 for 4-mode tensor")))
+
+(deftest sparse-tensor-mode-labels-with-domains
+  "sparse-tensor-mode-labels returns labels when domains are set."
+  (let* ((shape '(2 3))
+         (indices (make-array '(1 2) :element-type 'fixnum
+                              :initial-contents '((0 1))))
+         (values (make-array 1 :element-type 'double-float
+                             :initial-contents '(1.0d0)))
+         (domains (list (cltd:make-mode-metadata "mode0" '("a" "b"))
+                        (cltd:make-mode-metadata "mode1" '("x" "y" "z"))))
+         (tensor (cltd:make-sparse-tensor shape indices values :domains domains)))
+    (ok (equalp #("a" "b") (cltd:sparse-tensor-mode-labels tensor 0))
+        "sparse-tensor-mode-labels returns correct labels for mode 0")
+    (ok (equalp #("x" "y" "z") (cltd:sparse-tensor-mode-labels tensor 1))
+        "sparse-tensor-mode-labels returns correct labels for mode 1")))
+
+(deftest sparse-tensor-mode-labels-nil-domains
+  "sparse-tensor-mode-labels returns NIL when domains is NIL."
+  ;; x-tensor has no domains set
+  (ok (null (cltd:sparse-tensor-mode-labels x-tensor 0))
+      "sparse-tensor-mode-labels returns NIL for tensor without domains"))
+
+(deftest sparse-tensor-mode-labels-nil-mode-spec
+  "sparse-tensor-mode-labels returns NIL when mode-spec is NIL."
+  (let* ((shape '(2 3))
+         (indices (make-array '(1 2) :element-type 'fixnum
+                              :initial-contents '((0 1))))
+         (values (make-array 1 :element-type 'double-float
+                             :initial-contents '(1.0d0)))
+         ;; First mode has NIL, second mode has a mode-spec
+         (domains (vector nil (cltd:make-mode-metadata "mode1" '("x" "y" "z"))))
+         (tensor (cltd:make-sparse-tensor shape indices values :domains domains)))
+    (ok (null (cltd:sparse-tensor-mode-labels tensor 0))
+        "sparse-tensor-mode-labels returns NIL for NIL mode-spec")
+    (ok (equalp #("x" "y" "z") (cltd:sparse-tensor-mode-labels tensor 1))
+        "sparse-tensor-mode-labels returns labels for non-NIL mode-spec")))
+
+(deftest sparse-tensor-mode-name-with-domains
+  "sparse-tensor-mode-name returns mode name when domains are set."
+  (let* ((shape '(2 3))
+         (indices (make-array '(1 2) :element-type 'fixnum
+                              :initial-contents '((0 1))))
+         (values (make-array 1 :element-type 'double-float
+                             :initial-contents '(1.0d0)))
+         (domains (list (cltd:make-mode-metadata "user" '("a" "b"))
+                        (cltd:make-mode-metadata "product" '("x" "y" "z"))))
+         (tensor (cltd:make-sparse-tensor shape indices values :domains domains)))
+    (ok (string= "user" (cltd:sparse-tensor-mode-name tensor 0))
+        "sparse-tensor-mode-name returns correct name for mode 0")
+    (ok (string= "product" (cltd:sparse-tensor-mode-name tensor 1))
+        "sparse-tensor-mode-name returns correct name for mode 1")))
+
+(deftest sparse-tensor-mode-name-nil-domains
+  "sparse-tensor-mode-name returns NIL when domains is NIL."
+  ;; x-tensor has no domains set
+  (ok (null (cltd:sparse-tensor-mode-name x-tensor 0))
+      "sparse-tensor-mode-name returns NIL for tensor without domains"))
+
+(deftest sparse-tensor-total-count-sums-values
+  "sparse-tensor-total-count returns the sum of all values."
+  ;; x-tensor has values (1.0d0 2.0d0 3.0d0), sum = 6.0d0
+  (ok (< (abs (- 6.0d0 (cltd:sparse-tensor-total-count x-tensor))) +test-epsilon+)
+      "sparse-tensor-total-count returns 6.0d0 for x-tensor"))
+
+(deftest sparse-tensor-total-count-returns-double-float
+  "sparse-tensor-total-count returns a double-float."
+  (ok (typep (cltd:sparse-tensor-total-count x-tensor) 'double-float)
+      "sparse-tensor-total-count returns double-float type"))
+
+(deftest sparse-tensor-with-aux-data
+  "make-sparse-tensor accepts :aux argument and sparse-tensor-aux retrieves it."
+  (let* ((shape '(2 3))
+         (indices (make-array '(1 2) :element-type 'fixnum
+                              :initial-contents '((0 1))))
+         (values (make-array 1 :element-type 'double-float
+                             :initial-contents '(1.0d0)))
+         (aux-data '(:metadata "test" :version 1))
+         (tensor (cltd:make-sparse-tensor shape indices values :aux aux-data)))
+    (ok (equal aux-data (cltd:sparse-tensor-aux tensor))
+        "sparse-tensor-aux returns the auxiliary data")))
+
+(deftest sparse-tensor-aux-default-nil
+  "sparse-tensor-aux returns NIL when :aux is not specified."
+  ;; x-tensor has no aux data set
+  (ok (null (cltd:sparse-tensor-aux x-tensor))
+      "sparse-tensor-aux returns NIL for tensor without aux data"))
