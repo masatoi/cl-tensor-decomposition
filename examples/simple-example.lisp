@@ -1,6 +1,13 @@
+;;; -*- coding: utf-8; mode: lisp -*-
+;;;
+;;; Simple Example - Minimal tensor decomposition demo
+;;;
+
+(ql:quickload :cl-tensor-decomposition :silent t)
+
 (in-package :cltd)
 
-;; Prepare sparse tensor
+;; Prepare sparse tensor data
 
 (defparameter X-shape '(2 3 4))
 (defparameter number-of-non-zero-elements 3)
