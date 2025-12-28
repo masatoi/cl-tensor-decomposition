@@ -27,3 +27,10 @@ jobs:
       - name: Run Tests
         run: |
           ros -e "(asdf:test-system :cl-tensor-decomposition)"
+
+      - name: Run Examples
+        run: |
+          echo "=== Running simple-example.lisp ==="
+          ros run -l examples/simple-example.lisp -q
+          echo "=== Running palmer-penguins-analysis.lisp ==="
+          ros run -l examples/palmer-penguins-analysis.lisp -e '(palmer-penguins-analysis:run)' -q
