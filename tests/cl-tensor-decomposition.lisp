@@ -1152,6 +1152,170 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
     (ok (not (assoc :contribution_rank card))
         "Card does NOT have :contribution_rank when not provided")))
 
+;;; ---------------------------------------------------------------------------
+;;; Mode-Spec Reflection in Report Tests
+;;; ---------------------------------------------------------------------------
+
+(deftest mode-spec-discretization-reflected-in-card
+  "mode-spec discretization should be reflected in factor cards."
+  (let* ((mode0 (make-array '(2 2) :element-type 'double-float
+                            :initial-contents '((0.7d0 0.3d0) (0.2d0 0.8d0))))
+         (mode1 (make-array '(3 2) :element-type 'double-float
+                            :initial-contents '((0.5d0 0.5d0) (0.3d0 0.7d0) (0.4d0 0.6d0))))
+         (factor-matrices (make-array 2 :initial-contents (list mode0 mode1)))
+         (indices (make-array '(3 2) :element-type 'fixnum
+                              :initial-contents '((0 0) (0 1) (1 2))))
+         (counts (make-array 3 :element-type 'double-float
+                             :initial-contents '(10d0 20d0 15d0)))
+         (metadata (list
+                    (cltd:make-mode-metadata "user_type" '("premium" "free")
+                                             :discretization "membership-tier")
+                    (cltd:make-mode-metadata "category" '("food" "electronics" "clothing")
+                                             :discretization "top-3-categories")))
+         (cards (cltd:generate-factor-cards factor-matrices indices counts metadata)))
+    ;; Check :notes -> :discretization contains mode discretizations
+    (let* ((card (first cards))
+           (notes (cdr (assoc :notes card)))
+           (disc-info (cdr (assoc :discretization notes))))
+      (ok disc-info
+          "Card :notes has :discretization key")
+      (ok (find "membership-tier" disc-info :key #'cdr :test #'string=)
+          "discretization includes 'membership-tier' for user_type mode")
+      (ok (find "top-3-categories" disc-info :key #'cdr :test #'string=)
+          "discretization includes 'top-3-categories' for category mode"))))
+
+(deftest mode-spec-role-reflected-in-card
+  "mode-spec role should be reflected in factor cards."
+  (let* ((mode0 (make-array '(2 2) :element-type 'double-float
+                            :initial-contents '((0.8d0 0.2d0) (0.3d0 0.7d0))))
+         (mode1 (make-array '(3 2) :element-type 'double-float
+                            :initial-contents '((0.6d0 0.4d0) (0.2d0 0.8d0) (0.5d0 0.5d0))))
+         (factor-matrices (make-array 2 :initial-contents (list mode0 mode1)))
+         (indices (make-array '(3 2) :element-type 'fixnum
+                              :initial-contents '((0 0) (0 1) (1 2))))
+         (counts (make-array 3 :element-type 'double-float
+                             :initial-contents '(10d0 20d0 15d0)))
+         (metadata (list
+                    (cltd:make-mode-metadata "conversion" '("converted" "not_converted")
+                                             :role :purchase
+                                             :positive-label "converted"
+                                             :negative-label "not_converted")
+                    (cltd:make-mode-metadata "segment" '("young" "middle" "senior")
+                                             :role :demographic)))
+         (cards (cltd:generate-factor-cards factor-matrices indices counts metadata)))
+    ;; Check :mode_roles contains the role information
+    (let* ((card (first cards))
+           (mode-roles (cdr (assoc :mode_roles card))))
+      (ok mode-roles
+          "Card has :mode_roles key")
+      (ok (find :purchase mode-roles :key #'cdr)
+          ":mode_roles includes :purchase role")
+      (ok (find :demographic mode-roles :key #'cdr)
+          ":mode_roles includes :demographic role"))))
+
+(deftest mode-spec-purchase-bias-computed
+  "purchase_bias should be computed when :role :purchase is specified."
+  (let* ((mode0 (make-array '(2 2) :element-type 'double-float
+                            :initial-contents '((0.9d0 0.1d0) (0.2d0 0.8d0))))
+         (mode1 (make-array '(3 2) :element-type 'double-float
+                            :initial-contents '((0.5d0 0.5d0) (0.3d0 0.7d0) (0.4d0 0.6d0))))
+         (factor-matrices (make-array 2 :initial-contents (list mode0 mode1)))
+         (indices (make-array '(3 2) :element-type 'fixnum
+                              :initial-contents '((0 0) (0 1) (1 2))))
+         (counts (make-array 3 :element-type 'double-float
+                             :initial-contents '(10d0 20d0 15d0)))
+         (metadata (list
+                    (cltd:make-mode-metadata "purchase" '("yes" "no")
+                                             :role :purchase
+                                             :positive-label "yes"
+                                             :negative-label "no")
+                    (cltd:make-mode-metadata "category" '("A" "B" "C"))))
+         (cards (cltd:generate-factor-cards factor-matrices indices counts metadata)))
+    ;; Check :purchase_bias is present and is an alist with :purchase key
+    (let* ((card0 (first cards))
+           (card1 (second cards))
+           (bias0 (cdr (assoc :purchase_bias card0)))
+           (bias1 (cdr (assoc :purchase_bias card1)))
+           (purchase0 (cdr (assoc :purchase bias0)))
+           (purchase1 (cdr (assoc :purchase bias1))))
+      (ok (listp bias0)
+          "Factor 0 has :purchase_bias alist")
+      (ok (listp bias1)
+          "Factor 1 has :purchase_bias alist")
+      ;; Factor 0 has high weight on "yes" (0.9)
+      (ok (and (numberp purchase0) (> purchase0 0.8))
+          "Factor 0 with high 'yes' weight has high purchase probability")
+      ;; Factor 1 has low weight on "yes" (0.1)
+      (ok (and (numberp purchase1) (< purchase1 0.2))
+          "Factor 1 with low 'yes' weight has low purchase probability"))))
+
+(deftest mode-spec-without-purchase-role-has-zero-bias
+  "purchase_bias should have zero values when no mode has :role :purchase."
+  (let* ((mode0 (make-array '(2 2) :element-type 'double-float
+                            :initial-contents '((0.7d0 0.3d0) (0.2d0 0.8d0))))
+         (mode1 (make-array '(3 2) :element-type 'double-float
+                            :initial-contents '((0.5d0 0.5d0) (0.3d0 0.7d0) (0.4d0 0.6d0))))
+         (factor-matrices (make-array 2 :initial-contents (list mode0 mode1)))
+         (indices (make-array '(3 2) :element-type 'fixnum
+                              :initial-contents '((0 0) (0 1) (1 2))))
+         (counts (make-array 3 :element-type 'double-float
+                             :initial-contents '(10d0 20d0 15d0)))
+         ;; No :role :purchase in any metadata
+         (metadata (list
+                    (cltd:make-mode-metadata "type" '("A" "B")
+                                             :role :category)
+                    (cltd:make-mode-metadata "segment" '("X" "Y" "Z")
+                                             :role :demographic)))
+         (cards (cltd:generate-factor-cards factor-matrices indices counts metadata)))
+    (let* ((card (first cards))
+           (bias (cdr (assoc :purchase_bias card)))
+           (purchase-val (cdr (assoc :purchase bias)))
+           (not-purchase-val (cdr (assoc :not_purchase bias))))
+      (ok (and (numberp purchase-val) (= purchase-val 0.0d0))
+          ":purchase value is 0.0 when no mode has :role :purchase")
+      (ok (and (numberp not-purchase-val) (= not-purchase-val 0.0d0))
+          ":not_purchase value is 0.0 when no mode has :role :purchase"))))
+
+(deftest mode-summaries-contain-full-mode-spec-info
+  "mode_summaries should contain discretization and role for each mode."
+  (let* ((mode0 (make-array '(2 2) :element-type 'double-float
+                            :initial-contents '((0.7d0 0.3d0) (0.3d0 0.7d0))))
+         (mode1 (make-array '(3 2) :element-type 'double-float
+                            :initial-contents '((0.4d0 0.6d0) (0.5d0 0.5d0) (0.6d0 0.4d0))))
+         (factor-matrices (make-array 2 :initial-contents (list mode0 mode1)))
+         (indices (make-array '(3 2) :element-type 'fixnum
+                              :initial-contents '((0 0) (0 1) (1 2))))
+         (counts (make-array 3 :element-type 'double-float
+                             :initial-contents '(10d0 20d0 15d0)))
+         (metadata (list
+                    (cltd:make-mode-metadata "action" '("click" "skip")
+                                             :role :engagement
+                                             :discretization "binary-action")
+                    (cltd:make-mode-metadata "time" '("morning" "afternoon" "evening")
+                                             :role :temporal
+                                             :discretization "time-of-day")))
+         (cards (cltd:generate-factor-cards factor-matrices indices counts metadata)))
+    (let* ((card (first cards))
+           (summaries (cdr (assoc :mode_summaries card))))
+      (ok (= (length summaries) 2)
+          "mode_summaries has entry for each mode")
+      ;; Check first mode summary
+      (let ((summary0 (first summaries)))
+        (ok (string= (cdr (assoc :name summary0)) "action")
+            "First mode summary has correct name")
+        (ok (eq (cdr (assoc :role summary0)) :engagement)
+            "First mode summary has :role :engagement")
+        (ok (string= (cdr (assoc :discretization summary0)) "binary-action")
+            "First mode summary has discretization 'binary-action'"))
+      ;; Check second mode summary
+      (let ((summary1 (second summaries)))
+        (ok (string= (cdr (assoc :name summary1)) "time")
+            "Second mode summary has correct name")
+        (ok (eq (cdr (assoc :role summary1)) :temporal)
+            "Second mode summary has :role :temporal")
+        (ok (string= (cdr (assoc :discretization summary1)) "time-of-day")
+            "Second mode summary has discretization 'time-of-day'")))))
+
 ;;; ============================================================================
 ;;; Boundary Case Tests
 ;;; ============================================================================
