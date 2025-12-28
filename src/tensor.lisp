@@ -195,14 +195,18 @@ Signals invalid-input-error if validation fails."
 
 (defun sparse-tensor-nnz (tensor)
   "Return the number of non-zero entries in TENSOR."
-  (length (sparse-tensor-values tensor)))
+  (declare (type sparse-tensor tensor))
+  (the fixnum (length (sparse-tensor-values tensor))))
 
 (defun sparse-tensor-n-modes (tensor)
   "Return the number of modes (dimensions) in TENSOR."
-  (length (sparse-tensor-shape tensor)))
+  (declare (type sparse-tensor tensor))
+  (the fixnum (length (sparse-tensor-shape tensor))))
 
 (defun sparse-tensor-mode-labels (tensor mode)
   "Return the labels vector for MODE in TENSOR, or NIL if not available."
+  (declare (type sparse-tensor tensor)
+           (type fixnum mode))
   (when (sparse-tensor-domains tensor)
     (let ((domain (svref (sparse-tensor-domains tensor) mode)))
       (when domain
@@ -210,6 +214,8 @@ Signals invalid-input-error if validation fails."
 
 (defun sparse-tensor-mode-name (tensor mode)
   "Return the name string for MODE in TENSOR, or NIL if not available."
+  (declare (type sparse-tensor tensor)
+           (type fixnum mode))
   (when (sparse-tensor-domains tensor)
     (let ((domain (svref (sparse-tensor-domains tensor) mode)))
       (when domain
@@ -217,5 +223,9 @@ Signals invalid-input-error if validation fails."
 
 (defun sparse-tensor-total-count (tensor)
   "Return the sum of all values in TENSOR."
-  (loop for i from 0 below (length (sparse-tensor-values tensor))
-        sum (aref (sparse-tensor-values tensor) i) double-float))
+  (declare (type sparse-tensor tensor)
+           (optimize (speed 3) (safety 1)))
+  (let ((values (sparse-tensor-values tensor)))
+    (declare (type (simple-array double-float (*)) values))
+    (loop for i fixnum from 0 below (length values)
+          sum (aref values i) double-float)))
