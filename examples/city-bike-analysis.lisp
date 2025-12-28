@@ -376,13 +376,14 @@
       (print-preprocessing-summary summary)
       (format t "~&[Decomposition] Rank=~D, cycles=~D, convergence-threshold=~E~%"
               rank n-cycle convergence-threshold)
-      (multiple-value-bind (factor-matrix-vector iterations)
-          (decomposition x-shape indices values
-                         :R rank
-                         :n-cycle n-cycle
-                         :convergence-threshold convergence-threshold
-                         :convergence-window convergence-window
-                         :verbose verbose)
+      (let ((tensor (cltd:make-sparse-tensor x-shape indices values)))
+        (multiple-value-bind (factor-matrix-vector iterations)
+            (cltd:decomposition tensor
+                           :R rank
+                           :n-cycle n-cycle
+                           :convergence-threshold convergence-threshold
+                           :convergence-window convergence-window
+                           :verbose verbose)
         (format t "[Decomposition] Completed after ~D iterations.~%" iterations)
         (let* ((dataset-dir (pathname-directory-pathname path))
                (report-dir (ensure-directory-pathname (merge-pathnames *report-subdir* dataset-dir))))
@@ -399,6 +400,6 @@
             (format t "[Artifacts] JSON written to ~A~%" (namestring json-path))
             (format t "[Artifacts] Markdown report written to ~A~%" (namestring report-path))
             (print-card-preview cards :limit 3)
-            (values factor-matrix-vector cards json-path report-path)))))))
+            (values factor-matrix-vector cards json-path report-path))))))))
 
 (run)

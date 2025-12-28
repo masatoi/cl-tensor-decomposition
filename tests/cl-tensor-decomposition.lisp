@@ -13,6 +13,10 @@
 (defparameter X-value-vector
   (make-array 3 :element-type 'double-float :initial-contents '(1.0d0 2.0d0 3.0d0)))
 
+;; Pre-built sparse tensor for tests using the new API
+(defparameter X-tensor
+  (cltd:make-sparse-tensor X-shape X-indices-matrix X-value-vector))
+
 (defparameter +test-epsilon+ 1d-6)
 
 (deftest initialize-matrix-fills-matrix
@@ -89,8 +93,7 @@
         "ranking sorts labels by score")))
 
 (deftest decomposition-produces-factorization
-  (ok (decomposition X-shape X-indices-matrix X-value-vector
-                     :n-cycle 100 :R 2 :verbose t)
+  (ok (decomposition X-tensor :n-cycle 100 :R 2 :verbose t)
       "decomposition returns non-nil result"))
 
 (deftest factor-card-generation-produces-artifacts
@@ -138,7 +141,7 @@
 
 (deftest decomposition-converges-before-max-iterations
   (multiple-value-bind (result-vec iterations)
-      (cltd:decomposition X-shape X-indices-matrix X-value-vector
+      (cltd:decomposition X-tensor
                           :n-cycle 100
                           :R 2
                           :convergence-threshold 1d6
@@ -1031,8 +1034,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
   (let* ((random-state (cltd:%seed-random-state 42))
          (*random-state* random-state))
     (multiple-value-bind (factor-matrices)
-        (cltd:decomposition X-shape X-indices-matrix X-value-vector
-                            :n-cycle 20 :r 2)
+        (cltd:decomposition X-tensor :n-cycle 20 :r 2)
       (let* ((metadata (list
                         (cltd:make-mode-metadata "mode0" '("a" "b"))
                         (cltd:make-mode-metadata "mode1" '("x" "y" "z"))
@@ -1062,8 +1064,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
   (let* ((random-state (cltd:%seed-random-state 42))
          (*random-state* random-state))
     (multiple-value-bind (factor-matrices)
-        (cltd:decomposition X-shape X-indices-matrix X-value-vector
-                            :n-cycle 20 :r 2)
+        (cltd:decomposition X-tensor :n-cycle 20 :r 2)
       (let* ((metadata (list
                         (cltd:make-mode-metadata "mode0" '("a" "b"))
                         (cltd:make-mode-metadata "mode1" '("x" "y" "z"))
@@ -1093,8 +1094,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
          (*random-state* random-state))
     (declare (ignorable random-state))
     (multiple-value-bind (factor-matrices)
-        (cltd:decomposition X-shape X-indices-matrix X-value-vector
-                            :n-cycle 20 :r 2)
+        (cltd:decomposition X-tensor :n-cycle 20 :r 2)
       (let ((metadata (list
                        (cltd:make-mode-metadata "mode0" '("a" "b"))
                        (cltd:make-mode-metadata "mode1" '("x" "y" "z"))
@@ -1165,8 +1165,7 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
   (let* ((random-state (cltd:%seed-random-state 42))
          (*random-state* random-state))
     (multiple-value-bind (factor-matrices iterations)
-        (cltd:decomposition X-shape X-indices-matrix X-value-vector
-                            :n-cycle 50 :r 1)
+        (cltd:decomposition X-tensor :n-cycle 50 :r 1)
       (ok (= (length factor-matrices) 3)
           "Returns 3 factor matrices (one per mode)")
       (ok (= (array-dimension (svref factor-matrices 0) 1) 1)
@@ -1319,10 +1318,11 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
                               :initial-contents '((1 2))))
          (counts (make-array 1 :element-type 'double-float
                              :initial-contents '(5.0d0)))
+         (tensor (cltd:make-sparse-tensor x-shape indices counts))
          (random-state (cltd:%seed-random-state 42))
          (*random-state* random-state))
     (multiple-value-bind (factor-matrices iterations)
-        (cltd:decomposition x-shape indices counts :n-cycle 10 :r 2)
+        (cltd:decomposition tensor :n-cycle 10 :r 2)
       (ok (= (length factor-matrices) 2)
           "Returns factor matrices for 2 modes")
       (ok (numberp iterations)
@@ -1750,8 +1750,8 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
     (ok (< (abs (- (cltd:convergence-final-kl condition) 1.5d0)) 1.0d-10)
         "Final-kl accessor works")))
 
-(deftest decomposition-validates-by-default
-  "decomposition validates input by default."
+(deftest make-sparse-tensor-validates-input
+  "make-sparse-tensor validates input and signals invalid-input-error for bad data."
   (let ((x-shape '(2 3))
         (indices (make-array '(1 2) :element-type 'fixnum
                              :initial-contents '((0 5))))  ; Out of bounds
@@ -1760,26 +1760,58 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
     ;; Use handler-case to verify the right condition is raised
     (let ((caught nil))
       (handler-case
-          (cltd:decomposition x-shape indices values)
+          (cltd:make-sparse-tensor x-shape indices values)
         (cltd:invalid-input-error (c)
           (declare (ignore c))
           (setf caught t)))
       (ok caught
-          "decomposition signals invalid-input-error for bad input"))))
+          "make-sparse-tensor signals invalid-input-error for out-of-bounds indices"))))
 
-(deftest decomposition-can-skip-validation
-  "decomposition can skip validation with :validate nil."
-  ;; This test just verifies that :validate nil doesn't cause an error
-  ;; when the data is valid
+(deftest make-sparse-tensor-validates-domains
+  "make-sparse-tensor validates domains and rejects invalid domain specs."
+  (let ((x-shape '(2 3))
+        (indices (make-array '(1 2) :element-type 'fixnum
+                             :initial-contents '((0 1))))
+        (values (make-array 1 :element-type 'double-float
+                            :initial-contents '(1.0d0)))
+        ;; Invalid domain: list without :name key
+        (bad-domains (list '(:labels ("a" "b"))  ; missing :name
+                           nil)))
+    (let ((caught nil))
+      (handler-case
+          (cltd:make-sparse-tensor x-shape indices values :domains bad-domains)
+        (cltd:invalid-input-error (c)
+          (declare (ignore c))
+          (setf caught t)))
+      (ok caught
+          "make-sparse-tensor signals invalid-input-error for domains without :name"))))
+
+(deftest make-sparse-tensor-validates-domains-length
+  "make-sparse-tensor validates that domains length matches mode count."
   (let ((x-shape '(2 3))
         (indices (make-array '(1 2) :element-type 'fixnum
                              :initial-contents '((0 1))))
         (values (make-array 1 :element-type 'double-float
                             :initial-contents '(1.0d0))))
-    (multiple-value-bind (factors iterations)
-        (cltd:decomposition x-shape indices values
-                            :n-cycle 5 :r 2 :validate nil)
-      (ok (arrayp factors)
-          "Returns factor matrices with validate=nil")
-      (ok (plusp iterations)
-          "Returns positive iteration count"))))
+    ;; Test: too few domains
+    (let ((short-domains (list (cltd:make-mode-metadata "mode0" '("a" "b")))))
+      (let ((caught nil))
+        (handler-case
+            (cltd:make-sparse-tensor x-shape indices values :domains short-domains)
+          (cltd:invalid-input-error (c)
+            (declare (ignore c))
+            (setf caught t)))
+        (ok caught
+            "make-sparse-tensor signals invalid-input-error for too few domains")))
+    ;; Test: too many domains
+    (let ((long-domains (list (cltd:make-mode-metadata "mode0" '("a" "b"))
+                              (cltd:make-mode-metadata "mode1" '("x" "y" "z"))
+                              (cltd:make-mode-metadata "mode2" '("extra")))))
+      (let ((caught nil))
+        (handler-case
+            (cltd:make-sparse-tensor x-shape indices values :domains long-domains)
+          (cltd:invalid-input-error (c)
+            (declare (ignore c))
+            (setf caught t)))
+        (ok caught
+            "make-sparse-tensor signals invalid-input-error for too many domains")))))

@@ -1,24 +1,16 @@
+;;; -*- coding:utf-8; mode:lisp -*-
+
+;;;; reporting.lisp - Factor card generation and report artifacts
+;;;;
+;;;; This module generates interpretable factor cards from decomposition results,
+;;;; with support for JSON export and markdown report generation.
+;;;;
+;;;; Note: mode-spec structure and make-mode-metadata are defined in tensor.lisp
+
 (in-package :cl-tensor-decomposition)
 
-(defparameter *reporting-epsilon* 1.0d-8)
-
-(defun %normalize-mode-name (name)
-  "Convert NAME to a normalized string representation for mode names.
-Symbols are downcased, strings pass through unchanged, other types are printed."
-  (typecase name
-    (string name)
-    (symbol (string-downcase (symbol-name name)))
-    (t (princ-to-string name))))
-
-(defun %normalize-label (value)
-  "Convert VALUE to a normalized string representation for category labels.
-Handles strings, symbols (downcased), numbers, and characters."
-  (typecase value
-    (string value)
-    (symbol (string-downcase (symbol-name value)))
-    (number (princ-to-string value))
-    (character (string value))
-    (t (princ-to-string value))))
+(defparameter *reporting-epsilon* 1.0d-8
+  "Small epsilon value for numerical stability in reporting computations.")
 
 (defun round-to (value &optional (decimals 3))
   "Round VALUE to the specified number of DECIMALS places.
@@ -26,45 +18,6 @@ Returns a double-float rounded to the nearest 10^-DECIMALS."
   (let* ((factor (expt 10.0d0 decimals))
          (rounded (/ (round (* value factor)) factor)))
     (coerce rounded 'double-float)))
-
-(defstruct mode-spec
-  name
-  labels
-  discretization
-  missing-labels
-  role
-  positive-label
-  negative-label)
-
-(defun make-mode-metadata (name labels &key (discretization "unspecified")
-                                         (missing-labels nil)
-                                         role
-                                         positive-label
-                                         negative-label)
-  (let* ((labels-vector (if (typep labels 'vector)
-                            labels
-                            (coerce labels '(simple-vector))))
-         (normalized-labels (make-array (length labels-vector)
-                                        :element-type 'string
-                                        :initial-element "")))
-    (loop for i from 0 below (length labels-vector) do
-      (setf (aref normalized-labels i)
-            (%normalize-label (aref labels-vector i))))
-    (make-mode-spec :name (%normalize-mode-name name)
-                    :labels normalized-labels
-                    :discretization discretization
-                    :missing-labels (mapcar #'%normalize-label missing-labels)
-                    :role (cond ((null role) nil)
-                                ((keywordp role) role)
-                                ((symbolp role)
-                                 (intern (string-upcase (symbol-name role)) :keyword))
-                                ((stringp role)
-                                 (intern (string-upcase role) :keyword))
-                                (t role))
-                    :positive-label (and positive-label
-                                         (%normalize-label positive-label))
-                    :negative-label (and negative-label
-                                         (%normalize-label negative-label)))))
 
 (defun %coerce-mode-spec (metadata)
   (cond

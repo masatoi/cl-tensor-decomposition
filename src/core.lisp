@@ -13,7 +13,30 @@
            :make-fold-splits
            :cross-validate-rank
            :select-rank
+           ;; sparse-tensor structure and accessors
+           :sparse-tensor
+           :make-sparse-tensor
+           :sparse-tensor-shape
+           :sparse-tensor-indices
+           :sparse-tensor-values
+           :sparse-tensor-domains
+           :sparse-tensor-aux
+           :sparse-tensor-nnz
+           :sparse-tensor-n-modes
+           :sparse-tensor-mode-labels
+           :sparse-tensor-mode-name
+           :sparse-tensor-total-count
+           ;; mode-spec structure and constructor
+           :mode-spec
            :make-mode-metadata
+           :mode-spec-name
+           :mode-spec-labels
+           :mode-spec-discretization
+           :mode-spec-missing-labels
+           :mode-spec-role
+           :mode-spec-positive-label
+           :mode-spec-negative-label
+           ;; reporting
            :generate-factor-cards
            :write-factor-cards-json
            :write-scenario-report
@@ -175,6 +198,7 @@ This allows reproducible random number generation for testing."
   #+lispworks 1d308
   #-(or sbcl ccl ecl clisp allegro lispworks) most-positive-double-float
   "Positive infinity as a double-float. Portable across implementations.")
+
 (defun validate-input-data (x-shape x-indices-matrix x-value-vector
                             &key (error-on-invalid t))
   "Validate input data for tensor decomposition.
@@ -452,55 +476,77 @@ DENOMINATOR-TMP      - Temporary storage for denominator computation"
                 (setf last-smooth smooth))))))
       (values n-cycle))))
 
-(defun decomposition
-       (x-shape x-indices-matrix x-value-vector
-        &key (n-cycle 100) (r 20) verbose convergence-threshold
-        convergence-window (validate t))
+(defstruct mode-spec
+  "Metadata describing a single mode (dimension) of the tensor.
+
+NAME           - String name identifying this mode (e.g., \"user\", \"product\")
+LABELS         - Vector of category labels for this mode's indices
+DISCRETIZATION - Description of how continuous values were discretized
+MISSING-LABELS - List of labels representing missing/unknown values
+ROLE           - Keyword indicating semantic role (e.g., :purchase, :time)
+POSITIVE-LABEL - Label for positive outcome (for binary modes)
+NEGATIVE-LABEL - Label for negative outcome (for binary modes)"
+  (name nil :type (or null string))
+  (labels nil :type (or null simple-vector))
+  (discretization "unspecified" :type string)
+  (missing-labels nil :type list)
+  (role nil :type (or null keyword))
+  (positive-label nil :type (or null string))
+  (negative-label nil :type (or null string)))
+
+(defstruct (sparse-tensor (:constructor %make-sparse-tensor))
+  "Sparse tensor representation with optional domain metadata.
+
+SHAPE   - List of dimension sizes for each mode (e.g., '(100 50 10))
+INDICES - 2D fixnum array of shape (nnz, n-modes) containing coordinates
+VALUES  - 1D double-float array of observed counts/values at each index
+DOMAINS - Optional vector of mode-spec structures describing each mode
+AUX     - Optional auxiliary data (e.g., preprocessing metadata, hash tables)"
+  (shape nil :type list :read-only t)
+  (indices nil :type (simple-array fixnum (* *)) :read-only t)
+  (values nil :type (simple-array double-float (*)) :read-only t)
+  (domains nil :type (or null simple-vector) :read-only t)
+  (aux nil :type t))
+
+(defun decomposition (tensor &key (n-cycle 100) (r 20) verbose
+                             convergence-threshold convergence-window)
   "Run multiplicative-update tensor decomposition on sparse data.
 
-X-SHAPE       — list of tensor dimensions per mode.
-X-INDICES-MATRIX — fixnum matrix of non-zero coordinates, one row per datum.
-X-VALUE-VECTOR  — double-float vector of observed counts aligned with X-INDICES-MATRIX.
-N-CYCLE       — maximum iterations to perform; defaults to 100.
-R             — latent rank shared across factor matrices; defaults to 20.
-VERBOSE       — when true, emit per-iteration KL divergence logs; defaults to NIL (silent).
-CONVERGENCE-THRESHOLD — optional double-float tolerance on the relative change between
-                        successive smoothed KL averages (e.g., 1d-3 ≈ 0.1% change).
-CONVERGENCE-WINDOW   — length (positive integer) of the smoothing window; defaults to 5 when
-                        CONVERGENCE-THRESHOLD is provided, otherwise ignored.
-VALIDATE      — when true (default), validate input data before decomposition;
-                signals invalid-input-error if validation fails.
+TENSOR        - sparse-tensor structure containing shape, indices, and values.
+N-CYCLE       - maximum iterations to perform; defaults to 100.
+R             - latent rank shared across factor matrices; defaults to 20.
+VERBOSE       - when true, emit per-iteration KL divergence logs; defaults to NIL.
+CONVERGENCE-THRESHOLD - optional relative tolerance for early stopping.
+CONVERGENCE-WINDOW    - smoothing window length; defaults to 5.
 
-Returns the factor-matrix vector and the number of iterations actually executed."
-  ;; Validate input data if requested
-  (when validate
-    (validate-input-data x-shape x-indices-matrix x-value-vector))
-  (let ((x^-value-vector
-         (make-array (length x-value-vector) :element-type 'double-float
-                     :initial-element 1.0d0))
-        (factor-matrix-vector
-         (make-array (array-dimension x-indices-matrix 1) :initial-contents
-                     (loop for dim from 0 below (array-dimension
-                                                 x-indices-matrix 1)
-                           collect (make-array (list (nth dim x-shape) r)
-                                               :element-type 'double-float))))
-        (numerator-tmp
-         (make-array (array-dimension x-indices-matrix 1) :initial-contents
-                     (loop for dim from 0 below (array-dimension
-                                                 x-indices-matrix 1)
-                           collect (make-array (list (nth dim x-shape) r)
-                                               :element-type 'double-float
-                                               :initial-element 0.0d0))))
-        (denominator-tmp
-         (make-array (list (array-dimension x-indices-matrix 1) r)
-                     :element-type 'double-float :initial-element 1.0d0)))
+Returns the factor-matrix vector and the number of iterations executed."
+  (let* ((x-shape (sparse-tensor-shape tensor))
+         (indices (sparse-tensor-indices tensor))
+         (values (sparse-tensor-values tensor))
+         (x^-value-vector
+          (make-array (length values) :element-type 'double-float
+                      :initial-element 1.0d0))
+         (factor-matrix-vector
+          (make-array (array-dimension indices 1) :initial-contents
+                      (loop for dim from 0 below (array-dimension indices 1)
+                            collect (make-array (list (nth dim x-shape) r)
+                                                :element-type 'double-float))))
+         (numerator-tmp
+          (make-array (array-dimension indices 1) :initial-contents
+                      (loop for dim from 0 below (array-dimension indices 1)
+                            collect (make-array (list (nth dim x-shape) r)
+                                                :element-type 'double-float
+                                                :initial-element 0.0d0))))
+         (denominator-tmp
+          (make-array (list (array-dimension indices 1) r) :element-type
+                      'double-float :initial-element 1.0d0)))
     (loop for factor-matrix across factor-matrix-vector
           do (initialize-random-matrix factor-matrix))
     (multiple-value-bind (iterations)
-        (decomposition-inner n-cycle x-indices-matrix x-value-vector
-         x^-value-vector factor-matrix-vector numerator-tmp denominator-tmp
-         :verbose verbose :convergence-threshold convergence-threshold
-         :convergence-window convergence-window)
+        (decomposition-inner n-cycle indices values x^-value-vector
+         factor-matrix-vector numerator-tmp denominator-tmp :verbose verbose
+         :convergence-threshold convergence-threshold :convergence-window
+         convergence-window)
       (values factor-matrix-vector iterations))))
 
 (defun ranking (label-list factor-matrix r)

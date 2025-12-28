@@ -10,9 +10,10 @@
   :components ((:module "src"
                 :components
                 ((:file "core")
-                 (:file "reporting" :depends-on ("core"))
-                 (:file "model-selection" :depends-on ("core"))
-                 (:file "diagnostics" :depends-on ("core" "reporting")))))
+                 (:file "tensor" :depends-on ("core"))
+                 (:file "reporting" :depends-on ("core" "tensor"))
+                 (:file "model-selection" :depends-on ("core" "tensor"))
+                 (:file "diagnostics" :depends-on ("core" "tensor" "reporting")))))
   :description "A tensor decomposition library for Common Lisp which support sparse tensor."
   :long-description
   #.(read-file-string

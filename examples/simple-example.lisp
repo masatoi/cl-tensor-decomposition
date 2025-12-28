@@ -16,9 +16,13 @@
               :element-type 'double-float
               :initial-contents '(1.0d0 2.0d0 3.0d0)))
 
+;; Create sparse tensor
+(defparameter X-tensor
+  (make-sparse-tensor X-shape X-indices-matrix X-value-vector))
+
 ;; Decomposition
 
-(decomposition X-shape X-indices-matrix X-value-vector :n-cycle 10 :R 2 :verbose t)
+(decomposition X-tensor :n-cycle 10 :R 2 :verbose t)
 
 #|
 cycle: 1, kl-divergence: 12.340305

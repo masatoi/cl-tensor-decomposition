@@ -238,8 +238,12 @@
 
 ;;; Run
 
+;; Create sparse tensor
+(defparameter *X-tensor*
+  (cltd:make-sparse-tensor *X-shape* *X-indices-matrix* *X-value-vector*))
+
 (defparameter *result*
-  (decomposition *X-shape* *X-indices-matrix* *X-value-vector*
+  (cltd:decomposition *X-tensor*
                  :n-cycle 2000
                  :R 20
                  :verbose t

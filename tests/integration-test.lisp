@@ -91,15 +91,18 @@ Embedded patterns:
           (ok (cltd:validate-input-data *x-shape* x-indices x-values)
               "Synthetic data passes validation"))
 
-        ;; 2. Run decomposition
-        (testing "Decomposition completes successfully"
-          (multiple-value-bind (factor-matrices iterations)
-              (cltd:decomposition *x-shape* x-indices x-values
-                                  :r 4
-                                  :n-cycle 50
-                                  :convergence-threshold 1d-4
-                                  :convergence-window 5
-                                  :verbose nil)
+        ;; Create sparse tensor for decomposition
+        (let ((tensor (cltd:make-sparse-tensor *x-shape* x-indices x-values)))
+
+          ;; 2. Run decomposition
+          (testing "Decomposition completes successfully"
+            (multiple-value-bind (factor-matrices iterations)
+                (cltd:decomposition tensor
+                                    :r 4
+                                    :n-cycle 50
+                                    :convergence-threshold 1d-4
+                                    :convergence-window 5
+                                    :verbose nil)
             (ok (= (length factor-matrices) (length *x-shape*))
                 "Returns correct number of factor matrices")
             (ok (plusp iterations)
@@ -144,7 +147,7 @@ Embedded patterns:
                     (ok (plusp (length markdown))
                         "Markdown is non-empty")
                     (ok (search "Factor" markdown)
-                        "Markdown contains 'Factor'")))))))))))
+                        "Markdown contains 'Factor'"))))))))))))
 
 (deftest integration-diagnostics-output
   (testing "Diagnostics output structure"
@@ -152,11 +155,12 @@ Embedded patterns:
            (metadata (build-mode-metadata)))
       (multiple-value-bind (x-indices x-values)
           (make-synthetic-retail-data :random-state random-state)
-        (multiple-value-bind (factor-matrices iterations)
-            (cltd:decomposition *x-shape* x-indices x-values
-                                :r 3
-                                :n-cycle 30
-                                :verbose nil)
+        (let ((tensor (cltd:make-sparse-tensor *x-shape* x-indices x-values)))
+          (multiple-value-bind (factor-matrices iterations)
+              (cltd:decomposition tensor
+                                  :r 3
+                                  :n-cycle 30
+                                  :verbose nil)
           (declare (ignore iterations))
           ;; With include-diagnostics, returns (:model_diagnostics . ...) (:factors . ...)
           (let* ((result (cltd:generate-factor-cards
@@ -184,40 +188,41 @@ Embedded patterns:
                 (ok (assoc :kl_contribution first-card)
                     "Card has KL contribution")
                 (ok (assoc :contribution_rank first-card)
-                    "Card has contribution rank")))))))))
+                    "Card has contribution rank"))))))))))
 
 (deftest integration-convergence-behavior
   (testing "Convergence with threshold"
     (let* ((random-state (make-random-state nil)))
       (multiple-value-bind (x-indices x-values)
           (make-synthetic-retail-data :random-state random-state)
-        (multiple-value-bind (factor-matrices iterations)
-            (cltd:decomposition *x-shape* x-indices x-values
-                                :r 3
-                                :n-cycle 200
-                                :convergence-threshold 1d-5
-                                :convergence-window 5
-                                :verbose nil)
-          (declare (ignore factor-matrices))
-          (ok (< iterations 200)
-              "Converges before max iterations")
-          (ok (>= iterations 5)
-              "Runs at least convergence-window iterations"))))))
+        (let ((tensor (cltd:make-sparse-tensor *x-shape* x-indices x-values)))
+          (multiple-value-bind (factor-matrices iterations)
+              (cltd:decomposition tensor
+                                  :r 3
+                                  :n-cycle 200
+                                  :convergence-threshold 1d-5
+                                  :convergence-window 5
+                                  :verbose nil)
+            (declare (ignore factor-matrices))
+            (ok (< iterations 200)
+                "Converges before max iterations")
+            (ok (>= iterations 5)
+                "Runs at least convergence-window iterations")))))))
 
 (deftest integration-more-iterations-lower-kl
   (testing "More iterations generally reduce KL divergence"
     (let* ((random-state (make-random-state nil)))
       (multiple-value-bind (x-indices x-values)
           (make-synthetic-retail-data :random-state random-state)
-        ;; Run with more iterations - should get lower or equal KL
-        (multiple-value-bind (fm-later iterations-later)
-            (cltd:decomposition *x-shape* x-indices x-values
-                                :r 3 :n-cycle 100 :verbose nil)
-          (declare (ignore iterations-later))
-          (let ((kl-later (cltd:sparse-kl-divergence x-indices x-values fm-later)))
-            ;; Just check KL is finite and positive
-            (ok (and (numberp kl-later) (plusp kl-later) (= kl-later kl-later))
-                (format nil "KL divergence is valid: ~,4F" kl-later))))))))
+        (let ((tensor (cltd:make-sparse-tensor *x-shape* x-indices x-values)))
+          ;; Run with more iterations - should get lower or equal KL
+          (multiple-value-bind (fm-later iterations-later)
+              (cltd:decomposition tensor :r 3 :n-cycle 100 :verbose nil)
+            (declare (ignore iterations-later))
+            (let ((kl-later (cltd:sparse-kl-divergence x-indices x-values fm-later)))
+              ;; Just check KL is finite and positive
+              (ok (and (numberp kl-later) (plusp kl-later) (= kl-later kl-later))
+                  (format nil "KL divergence is valid: ~,4F" kl-later)))))))))
 
 (deftest integration-ranking-consistency
   (testing "Ranking function works with decomposition results"
@@ -225,21 +230,21 @@ Embedded patterns:
            (rank 3))
       (multiple-value-bind (x-indices x-values)
           (make-synthetic-retail-data :random-state random-state)
-        (multiple-value-bind (factor-matrices iterations)
-            (cltd:decomposition *x-shape* x-indices x-values
-                                :r rank :n-cycle 30 :verbose nil)
-          (declare (ignore iterations))
-          ;; Get ranking for each mode and each factor
-          ;; factor-matrices is a vector of 2D arrays
-          (let ((all-labels (list *customer-segments* *product-categories*
-                                  *time-slots* *channels*)))
-            (loop for mode from 0 below (length factor-matrices)
-                  for fm = (aref factor-matrices mode)
-                  for labels = (nth mode all-labels)
-                  do (loop for r from 0 below rank
-                           do (let ((ranking (cltd:ranking labels fm r)))
-                                (ok (= (length ranking) (length labels))
-                                    (format nil "Mode ~D, Factor ~D: ranking has all labels" mode r))
-                                ;; Check ranking is sorted descending by weight
-                                (ok (listp ranking)
-                                    "Ranking is a list of (label . weight) pairs"))))))))))
+        (let ((tensor (cltd:make-sparse-tensor *x-shape* x-indices x-values)))
+          (multiple-value-bind (factor-matrices iterations)
+              (cltd:decomposition tensor :r rank :n-cycle 30 :verbose nil)
+            (declare (ignore iterations))
+            ;; Get ranking for each mode and each factor
+            ;; factor-matrices is a vector of 2D arrays
+            (let ((all-labels (list *customer-segments* *product-categories*
+                                    *time-slots* *channels*)))
+              (loop for mode from 0 below (length factor-matrices)
+                    for fm = (aref factor-matrices mode)
+                    for labels = (nth mode all-labels)
+                    do (loop for r from 0 below rank
+                             do (let ((ranking (cltd:ranking labels fm r)))
+                                  (ok (= (length ranking) (length labels))
+                                      (format nil "Mode ~D, Factor ~D: ranking has all labels" mode r))
+                                  ;; Check ranking is sorted descending by weight
+                                  (ok (listp ranking)
+                                      "Ranking is a list of (label . weight) pairs")))))))))))

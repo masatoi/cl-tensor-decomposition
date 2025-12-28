@@ -83,10 +83,10 @@ Used to create training sets from validation fold indices."
           unless (= (aref mask i) 1)
             collect i)))
 
-(defun %evaluate-fold (shape train-indices train-counts valid-indices valid-counts rank
-                      &key (n-cycle 100) convergence-threshold convergence-window
-                           (evaluation-function #'sparse-kl-divergence)
-                           verbose)
+(defun %evaluate-fold
+       (shape train-indices train-counts valid-indices valid-counts rank
+        &key (n-cycle 100) convergence-threshold convergence-window
+        (evaluation-function #'sparse-kl-divergence) verbose)
   "Evaluate a single fold of cross-validation.
 
 Fits a decomposition model on training data and evaluates it on validation data.
@@ -100,21 +100,17 @@ EVALUATION-FUNCTION computes the validation score (default: sparse-kl-divergence
 VERBOSE controls output during decomposition.
 
 Returns the evaluation score on the validation set."
-  (multiple-value-bind (factor-matrix-vector iterations)
-      (decomposition shape
-                     train-indices
-                     train-counts
-                     :R rank
-                     :n-cycle n-cycle
-                     :convergence-threshold convergence-threshold
-                     :convergence-window convergence-window
-                     :verbose verbose)
-    (declare (ignore iterations))
-    (let ((approx (make-array (length valid-counts)
-                              :element-type 'double-float
-                              :initial-element 0d0)))
-      (sdot factor-matrix-vector valid-indices approx)
-      (funcall evaluation-function valid-indices valid-counts approx))))
+  (let ((train-tensor (make-sparse-tensor shape train-indices train-counts)))
+    (multiple-value-bind (factor-matrix-vector iterations)
+        (decomposition train-tensor :r rank :n-cycle n-cycle
+         :convergence-threshold convergence-threshold :convergence-window
+         convergence-window :verbose verbose)
+      (declare (ignore iterations))
+      (let ((approx
+             (make-array (length valid-counts) :element-type 'double-float
+                         :initial-element 0.0d0)))
+        (sdot factor-matrix-vector valid-indices approx)
+        (funcall evaluation-function valid-indices valid-counts approx)))))
 
 (defun cross-validate-rank (indices counts ranks &key (k 5)
                                     (n-cycle 100)

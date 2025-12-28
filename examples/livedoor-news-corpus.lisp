@@ -78,11 +78,15 @@
                            'double-float))
              (incf nz-index))))
 
+;; Create sparse tensor
+(defparameter X-tensor
+  (make-sparse-tensor X-shape X-indices-matrix X-value-vector))
+
 ;;; Training
 (defparameter R 6)
 
 (time (defparameter factor-matrix-vector
-        (decomposition X-shape X-indices-matrix X-value-vector :n-cycle 100 :R R :verbose t)))
+        (decomposition X-tensor :n-cycle 100 :R R :verbose t)))
 
 ;; Evaluation took:
 ;;   4.420 seconds of real time

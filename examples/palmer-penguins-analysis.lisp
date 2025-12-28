@@ -119,19 +119,19 @@ Returns the factor cards alist."
   (multiple-value-bind (x-indices x-values)
       (build-tensor-from-data *penguins-data* (length *x-shape*))
 
-    ;; Validate input
-    (validate-input-data *x-shape* x-indices x-values)
-    (format t "  Total observations: ~,0F~%" (reduce #'+ x-values))
+    ;; Create sparse tensor (validates input internally)
+    (let ((tensor (make-sparse-tensor *x-shape* x-indices x-values)))
+      (format t "  Total observations: ~,0F~%" (reduce #'+ x-values))
 
-    ;; Run decomposition
-    (format t "~%Running decomposition (rank=~D)...~%" rank)
-    (multiple-value-bind (factor-matrices iterations)
-        (decomposition *x-shape* x-indices x-values
-                       :r rank
-                       :n-cycle n-cycle
-                       :convergence-threshold 1d-5
-                       :convergence-window 5
-                       :verbose verbose)
+      ;; Run decomposition
+      (format t "~%Running decomposition (rank=~D)...~%" rank)
+      (multiple-value-bind (factor-matrices iterations)
+          (decomposition tensor
+                         :r rank
+                         :n-cycle n-cycle
+                         :convergence-threshold 1d-5
+                         :convergence-window 5
+                         :verbose verbose)
 
       (format t "Converged in ~D iterations~%" iterations)
 
@@ -162,7 +162,7 @@ Returns the factor cards alist."
           (write-scenario-report cards output-markdown)
           (format t "Markdown report written to ~A~%" output-markdown))
 
-        cards))))
+        cards)))))
 
 ;;; ==========================================================================
 ;;; Run the example
