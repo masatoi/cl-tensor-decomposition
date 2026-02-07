@@ -223,3 +223,53 @@ Example:
                        :key (lambda (result)
                               (cdr (assoc :mean result)))))
             cv-results)))
+
+(defun select-rank-1se
+       (indices counts ranks
+        &key (k 5) (n-cycle 100) convergence-threshold convergence-window
+        (evaluation-function #'sparse-kl-divergence) random-state verbose)
+  "Select rank using the 1-SE rule for tensor decomposition.
+
+The 1-SE (one standard error) rule selects the simplest model (smallest rank)
+whose validation score is within one standard error of the best model.
+This approach favors parsimony and helps prevent overfitting.
+
+INDICES is the sparse tensor index matrix (NNZ x N-MODES).
+COUNTS is the observation count vector.
+RANKS is a list of candidate rank values to evaluate.
+Other parameters are passed through to CROSS-VALIDATE-RANK.
+
+Returns two values:
+  1. The result alist for the selected rank (simplest within 1-SE of best)
+  2. The complete list of all cross-validation results
+
+Example:
+  (select-rank-1se indices counts '(2 3 4 5 6 7 8) :k 5 :n-cycle 50)
+  ;; If rank=5 has best mean=0.10 with std=0.02, threshold=0.12
+  ;; Selects smallest rank with mean <= 0.12
+  => ((:rank . 3) (:mean . 0.115) (:std . 0.018) (:scores . (...)))
+     (((:rank . 2) ...) ((:rank . 3) ...) ...)"
+  (let* ((cv-key-args
+          (list :k k :n-cycle n-cycle :convergence-threshold
+                convergence-threshold :convergence-window convergence-window
+                :evaluation-function evaluation-function :verbose verbose))
+         (cv-key-args
+          (if random-state
+              (append cv-key-args (list :random-state random-state))
+              cv-key-args))
+         (cv-results
+          (apply #'cross-validate-rank indices counts ranks cv-key-args)))
+    ;; Find the best result (lowest mean)
+    (let* ((best (car (sort (copy-list cv-results) #'<
+                            :key (lambda (r) (cdr (assoc :mean r))))))
+           (best-mean (cdr (assoc :mean best)))
+           (best-std (cdr (assoc :std best)))
+           (threshold (+ best-mean best-std))
+           ;; Filter results within 1-SE threshold
+           (within-threshold
+            (remove-if (lambda (r) (> (cdr (assoc :mean r)) threshold))
+                       cv-results))
+           ;; Select smallest rank among those within threshold
+           (selected (car (sort within-threshold #'<
+                                :key (lambda (r) (cdr (assoc :rank r)))))))
+      (values selected cv-results))))
