@@ -2232,3 +2232,56 @@ threshold = best_mean + best_std / sqrt(k)"
         (ok (= selected-rank smallest-rank)
             (format nil "Selected smallest rank (~D) within threshold"
                     selected-rank))))))
+
+;;; ============================================================
+;;; CORCONDIA (Core Consistency Diagnostic) Tests
+;;; ============================================================
+
+(deftest corcondia-returns-valid-score
+  "CORCONDIA returns a score between 0 and 100."
+  (let ((tensor (cltd:make-sparse-tensor x-shape x-indices-matrix x-value-vector)))
+    (multiple-value-bind (factors iterations)
+        (cltd:decomposition tensor :r 2 :n-cycle 50)
+      (declare (ignore iterations))
+      (let ((score (cltd:corcondia tensor factors)))
+        (ok (>= score 0.0d0)
+            "CORCONDIA score is non-negative")
+        (ok (<= score 100.0d0)
+            "CORCONDIA score is at most 100")))))
+
+(deftest corcondia-lower-rank-higher-score
+  "Lower rank typically produces higher CORCONDIA score (less overfitting)."
+  (let* ((shape '(5 4 3))
+         (indices (make-array '(10 3) :element-type 'fixnum
+                              :initial-contents '((0 0 0) (1 1 1) (2 2 2)
+                                                  (0 1 0) (1 2 1) (2 0 2)
+                                                  (3 1 0) (4 2 1) (0 3 2)
+                                                  (1 0 0))))
+         (values (make-array 10 :element-type 'double-float
+                             :initial-contents '(5.0d0 10.0d0 8.0d0
+                                                 3.0d0 4.0d0 2.0d0
+                                                 1.0d0 6.0d0 7.0d0
+                                                 2.0d0)))
+         (tensor (cltd:make-sparse-tensor shape indices values)))
+    ;; Decompose with rank 2 and rank 3
+    (let* ((factors-r2 (cltd:decomposition tensor :r 2 :n-cycle 100))
+           (factors-r3 (cltd:decomposition tensor :r 3 :n-cycle 100))
+           (score-r2 (cltd:corcondia tensor factors-r2))
+           (score-r3 (cltd:corcondia tensor factors-r3)))
+      ;; Lower rank should generally have higher CORCONDIA
+      ;; (indicating better superdiagonal structure)
+      (ok (> score-r2 score-r3)
+          (format nil "Rank 2 (~,1F%%) > Rank 3 (~,1F%%)" score-r2 score-r3)))))
+
+(deftest corcondia-verbose-output
+  "CORCONDIA with verbose=t prints diagnostic information."
+  (let* ((tensor (cltd:make-sparse-tensor x-shape x-indices-matrix x-value-vector))
+         (factors (cltd:decomposition tensor :r 2 :n-cycle 30))
+         (output (with-output-to-string (*standard-output*)
+                   (cltd:corcondia tensor factors :verbose t))))
+    (ok (search "pseudo-inverse" output)
+        "Verbose output mentions pseudo-inverse computation")
+    (ok (search "core tensor" output)
+        "Verbose output mentions core tensor")
+    (ok (search "CORCONDIA" output)
+        "Verbose output includes CORCONDIA score")))
