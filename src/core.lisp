@@ -84,7 +84,9 @@
            :compute-observation-residuals
            :compute-residual-stats
            :residual-stats->alist
-           :find-high-residual-observations))
+           :find-high-residual-observations
+           ;; corcondia - core consistency diagnostic
+           :corcondia))
 
 (in-package :cl-tensor-decomposition)
 
