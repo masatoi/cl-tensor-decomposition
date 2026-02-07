@@ -189,48 +189,141 @@ Returns a flat vector representing the dense core tensor in row-major order."
     core))
 
 
-(defun %compute-corcondia-from-core (core rank n-modes)
+
+(defun %validate-factor-matrices (tensor factor-matrix-vector)
+  "Validate that factor matrices have correct dimensions for the tensor.
+
+Each factor matrix must be (mode-size × rank) where:
+- mode-size matches the corresponding tensor dimension
+- rank is consistent across all factor matrices
+
+Signals an error if validation fails."
+  (let* ((n-modes (length factor-matrix-vector))
+         (shape (sparse-tensor-shape tensor))
+         (rank (array-dimension (aref factor-matrix-vector 0) 1)))
+    ;; Check number of modes
+    (assert (= n-modes (length shape)) ()
+            "Number of factor matrices (~D) must match tensor modes (~D)"
+            n-modes (length shape))
+    ;; Check each factor matrix
+    (loop for mode from 0 below n-modes
+          for fm = (aref factor-matrix-vector mode)
+          for expected-rows = (nth mode shape)
+          for actual-rows = (array-dimension fm 0)
+          for actual-cols = (array-dimension fm 1)
+          do
+             ;; Check row count matches mode size
+             (assert (= actual-rows expected-rows) ()
+                     "Factor matrix ~D has ~D rows but tensor mode ~D has size ~D"
+                     mode actual-rows mode expected-rows)
+             ;; Check column count (rank) is consistent
+             (assert (= actual-cols rank) ()
+                     "Factor matrix ~D has ~D columns but expected rank ~D"
+                     mode actual-cols rank))
+    ;; Return validated rank
+    rank))
+
+
+(defun %normalize-factor-matrices (factor-matrix-vector)
+  "Normalize factor matrices and compute lambda (weight) vector.
+
+Each column of each factor matrix is normalized to have L1-sum = 1.
+The lambda vector contains the product of original column sums across
+all modes for each factor.
+
+Returns two values:
+  1. Vector of normalized factor matrices (copies, originals unchanged)
+  2. Lambda vector of length R (factor weights)
+
+This normalization ensures the ideal core tensor has λ_r on the
+superdiagonal, making CORCONDIA invariant to factor scaling."
+  (let* ((n-modes (length factor-matrix-vector))
+         (rank (array-dimension (aref factor-matrix-vector 0) 1))
+         (lambda-vec (make-array rank :element-type 'double-float
+                                      :initial-element 1.0d0))
+         (normalized (make-array n-modes)))
+    ;; Process each factor matrix
+    (loop for mode from 0 below n-modes
+          for fm = (aref factor-matrix-vector mode)
+          for n-rows = (array-dimension fm 0)
+          for fm-norm = (make-array (list n-rows rank)
+                                    :element-type 'double-float)
+          do
+             ;; Normalize each column
+             (loop for r from 0 below rank
+                   for col-sum = (loop for i from 0 below n-rows
+                                       sum (aref fm i r) double-float)
+                   do
+                      ;; Accumulate into lambda
+                      (setf (aref lambda-vec r)
+                            (* (aref lambda-vec r) col-sum))
+                      ;; Normalize column (avoid division by zero)
+                      (if (> col-sum 1.0d-15)
+                          (loop for i from 0 below n-rows
+                                do (setf (aref fm-norm i r)
+                                         (/ (aref fm i r) col-sum)))
+                          ;; If column is all zeros, keep it zero
+                          (loop for i from 0 below n-rows
+                                do (setf (aref fm-norm i r) 0.0d0))))
+             (setf (aref normalized mode) fm-norm))
+    (values normalized lambda-vec)))
+
+(defun %compute-corcondia-from-core (core rank n-modes lambda-vec)
   "Compute CORCONDIA score from the core tensor.
 
-The ideal superdiagonal tensor T has T[r,r,r,...] = 1 for r = 0..R-1
-and all other elements = 0.
+The ideal superdiagonal tensor T has T[r,r,r,...] = λ_r for r = 0..R-1
+and all other elements = 0, where λ_r is the factor weight.
 
-CORCONDIA = 100 × (1 - Σ(G[i] - T[i])² / R)
+CORCONDIA = 100 × (1 - Σ(G[i] - T[i])² / Σλ_r²)
 
 where the sum is over all core tensor elements."
-  (declare (type (simple-array double-float (*)) core)
+  (declare (type (simple-array double-float (*)) core lambda-vec)
            (type fixnum rank n-modes))
   (let ((sum-sq-diff 0.0d0)
+        (sum-sq-lambda 0.0d0)
         (core-size (length core)))
-    (declare (type double-float sum-sq-diff)
+    (declare (type double-float sum-sq-diff sum-sq-lambda)
              (type fixnum core-size))
+    ;; Compute sum of squared lambda values for normalization
+    (loop for r from 0 below rank
+          do (incf sum-sq-lambda (* (aref lambda-vec r) (aref lambda-vec r))))
+    ;; Handle edge case where all lambdas are zero
+    (when (< sum-sq-lambda 1.0d-15)
+      (return-from %compute-corcondia-from-core 0.0d0))
     (loop for core-idx fixnum from 0 below core-size do
       ;; Check if this is a superdiagonal element (all mode indices equal)
       (let ((is-superdiag t)
             (idx core-idx)
-            (first-mode-idx nil))
-        (declare (type (or null fixnum) first-mode-idx))
+            (first-mode-idx nil)
+            (diag-idx 0))
+        (declare (type (or null fixnum) first-mode-idx)
+                 (type fixnum diag-idx))
         ;; Decode and check if all indices are equal
         (loop for mode fixnum from (1- n-modes) downto 0 do
           (let ((mode-idx (mod idx rank)))
+            (when (= mode (1- n-modes))
+              (setf diag-idx mode-idx))
             (if (null first-mode-idx)
                 (setf first-mode-idx mode-idx)
                 (unless (= mode-idx first-mode-idx)
                   (setf is-superdiag nil)))
             (setf idx (floor idx rank))))
         ;; Compute squared difference from ideal
-        (let* ((ideal (if is-superdiag 1.0d0 0.0d0))
+        ;; Ideal is λ_r for superdiagonal elements, 0 otherwise
+        (let* ((ideal (if is-superdiag (aref lambda-vec diag-idx) 0.0d0))
                (diff (- (aref core core-idx) ideal)))
           (incf sum-sq-diff (* diff diff)))))
-    ;; CORCONDIA formula: 100 * (1 - sum_sq_diff / R)
-    (let ((score (* 100.0d0 (- 1.0d0 (/ sum-sq-diff (coerce rank 'double-float))))))
+    ;; CORCONDIA formula: 100 * (1 - sum_sq_diff / sum_sq_lambda)
+    (let ((score (* 100.0d0 (- 1.0d0 (/ sum-sq-diff sum-sq-lambda)))))
       ;; Clip to [0, 100] range
       ;; Negative values can occur with very poor fits
       (max 0.0d0 (min 100.0d0 score)))))
 
+
 ;;; ============================================================
 ;;; Main CORCONDIA Function
 ;;; ============================================================
+
 
 (defun corcondia (tensor factor-matrix-vector
                   &key (epsilon 1.0d-12) verbose)
@@ -249,6 +342,9 @@ Optional parameters:
   EPSILON - Threshold for singularity detection in pseudo-inverse (default 1e-12)
   VERBOSE - When T, print diagnostic information including core tensor structure
 
+Note: Factor matrices are internally normalized before computing CORCONDIA
+to ensure the score is invariant to factor scaling.
+
 Reference:
   Bro, R., & Kiers, H. A. (2003). A new efficient method for determining
   the number of components in PARAFAC models. J. Chemometrics, 17, 274-286.
@@ -260,68 +356,77 @@ Example:
   => 85.3  ; Good fit at rank 3"
   (declare (type sparse-tensor tensor)
            (type simple-vector factor-matrix-vector))
-  (let* ((n-modes (length factor-matrix-vector))
-         (rank (array-dimension (aref factor-matrix-vector 0) 1))
-         (x-indices (sparse-tensor-indices tensor))
-         (x-values (sparse-tensor-values tensor))
-         ;; Compute pseudo-inverse of each factor matrix
-         (pseudo-inverses (make-array n-modes)))
-    (declare (type fixnum n-modes rank))
-    ;; Validate inputs
-    (assert (= n-modes (sparse-tensor-n-modes tensor)) ()
-            "Number of factor matrices (~D) must match tensor modes (~D)"
-            n-modes (sparse-tensor-n-modes tensor))
-    ;; Compute pseudo-inverses
-    (when verbose
-      (format t "~&Computing pseudo-inverses for ~D factor matrices...~%" n-modes))
-    (loop for mode from 0 below n-modes do
-      (let* ((fm (aref factor-matrix-vector mode))
-             (pinv (%pseudo-inverse fm :epsilon epsilon)))
-        (unless pinv
-          (warn "Factor matrix ~D is rank-deficient; CORCONDIA may be unreliable" mode)
-          ;; Use a regularized pseudo-inverse or return early
-          (return-from corcondia 0.0d0))
-        (setf (aref pseudo-inverses mode) pinv)
+  ;; Validate factor matrix dimensions
+  (let ((rank (%validate-factor-matrices tensor factor-matrix-vector)))
+    (declare (type fixnum rank))
+    ;; Normalize factor matrices and compute lambda
+    (multiple-value-bind (normalized-factors lambda-vec)
+        (%normalize-factor-matrices factor-matrix-vector)
+      (let* ((n-modes (length normalized-factors))
+             (x-indices (sparse-tensor-indices tensor))
+             (x-values (sparse-tensor-values tensor))
+             (pseudo-inverses (make-array n-modes)))
+        (declare (type fixnum n-modes))
         (when verbose
-          (format t "  Mode ~D: ~Dx~D -> pseudo-inverse ~Dx~D~%"
-                  mode
-                  (array-dimension fm 0) (array-dimension fm 1)
-                  (array-dimension pinv 0) (array-dimension pinv 1)))))
-    ;; Compute core tensor
-    (when verbose
-      (format t "Computing ~D-way core tensor of size ~D^~D = ~D elements...~%"
-              n-modes rank n-modes (expt rank n-modes)))
-    (let ((core (%compute-core-tensor-sparse x-indices x-values
-                                              pseudo-inverses rank)))
-      ;; Optionally print core tensor structure
-      (when verbose
-        (format t "~&Core tensor structure (superdiagonal elements highlighted):~%")
-        (let ((core-size (length core)))
-          (loop for core-idx from 0 below (min core-size 50) do
-            ;; Decode indices for display
-            (let ((indices nil)
-                  (idx core-idx))
-              (loop for mode from (1- n-modes) downto 0 do
-                (push (mod idx rank) indices)
-                (setf idx (floor idx rank)))
-              (let ((is-superdiag (apply #'= indices)))
-                (format t "  G~A = ~,4F~A~%"
-                        indices
-                        (aref core core-idx)
-                        (if is-superdiag " *" "")))))
-          (when (> core-size 50)
-            (format t "  ... (~D more elements)~%" (- core-size 50)))))
-      ;; Compute and return CORCONDIA score
-      (let ((score (%compute-corcondia-from-core core rank n-modes)))
+          (format t "~&Computing CORCONDIA with factor normalization...~%")
+          (format t "Lambda (factor weights): ~{~,4F~^, ~}~%"
+                  (coerce lambda-vec 'list)))
+        ;; Compute pseudo-inverses of normalized factor matrices
         (when verbose
-          (format t "~&CORCONDIA = ~,2F%~%" score)
-          (cond
-            ((>= score 90)
-             (format t "Interpretation: Excellent fit, rank ~D is appropriate.~%" rank))
-            ((>= score 70)
-             (format t "Interpretation: Good fit, rank ~D is reasonable.~%" rank))
-            ((>= score 50)
-             (format t "Interpretation: Marginal fit, consider smaller rank.~%"))
-            (t
-             (format t "Interpretation: Poor fit, rank ~D is likely too high.~%" rank))))
-        score))))
+          (format t "Computing pseudo-inverses for ~D factor matrices...~%" n-modes))
+        (loop for mode from 0 below n-modes do
+          (let* ((fm (aref normalized-factors mode))
+                 (pinv (%pseudo-inverse fm :epsilon epsilon)))
+            (unless pinv
+              (warn "Factor matrix ~D is rank-deficient; CORCONDIA may be unreliable" mode)
+              (return-from corcondia 0.0d0))
+            (setf (aref pseudo-inverses mode) pinv)
+            (when verbose
+              (format t "  Mode ~D: ~Dx~D -> pseudo-inverse ~Dx~D~%"
+                      mode
+                      (array-dimension fm 0) (array-dimension fm 1)
+                      (array-dimension pinv 0) (array-dimension pinv 1)))))
+        ;; Compute core tensor
+        (when verbose
+          (format t "Computing ~D-way core tensor of size ~D^~D = ~D elements...~%"
+                  n-modes rank n-modes (expt rank n-modes)))
+        (let ((core (%compute-core-tensor-sparse x-indices x-values
+                                                  pseudo-inverses rank)))
+          ;; Optionally print core tensor structure
+          (when verbose
+            (format t "~&Core tensor structure (superdiagonal elements highlighted):~%")
+            (let ((core-size (length core)))
+              (loop for core-idx from 0 below (min core-size 50) do
+                (let ((indices nil)
+                      (idx core-idx)
+                      (diag-idx 0))
+                  (loop for mode from (1- n-modes) downto 0 do
+                    (let ((mode-idx (mod idx rank)))
+                      (when (= mode (1- n-modes))
+                        (setf diag-idx mode-idx))
+                      (push mode-idx indices)
+                      (setf idx (floor idx rank))))
+                  (let ((is-superdiag (apply #'= indices)))
+                    (format t "  G~A = ~,4F~A~%"
+                            indices
+                            (aref core core-idx)
+                            (if is-superdiag
+                                (format nil " * (ideal: ~,4F)" (aref lambda-vec diag-idx))
+                                "")))))
+              (when (> core-size 50)
+                (format t "  ... (~D more elements)~%" (- core-size 50)))))
+          ;; Compute and return CORCONDIA score
+          (let ((score (%compute-corcondia-from-core core rank n-modes lambda-vec)))
+            (when verbose
+              (format t "~&CORCONDIA = ~,2F%~%" score)
+              (cond
+                ((>= score 90)
+                 (format t "Interpretation: Excellent fit, rank ~D is appropriate.~%" rank))
+                ((>= score 70)
+                 (format t "Interpretation: Good fit, rank ~D is reasonable.~%" rank))
+                ((>= score 50)
+                 (format t "Interpretation: Marginal fit, consider smaller rank.~%"))
+                (t
+                 (format t "Interpretation: Poor fit, rank ~D is likely too high.~%" rank))))
+            score))))))
+

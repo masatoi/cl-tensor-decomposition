@@ -2360,8 +2360,10 @@ threshold = best_mean + best_std / sqrt(k)"
          (core (make-array 8 :element-type 'double-float
                            :initial-contents '(1.0d0 0.0d0 0.0d0 0.0d0
                                                0.0d0 0.0d0 0.0d0 1.0d0)))
+         (lambda-vec (make-array 2 :element-type 'double-float
+                                   :initial-contents '(1.0d0 1.0d0)))
          (score (cl-tensor-decomposition::%compute-corcondia-from-core
-                 core rank n-modes)))
+                 core rank n-modes lambda-vec)))
     (ok (< (abs (- 100.0d0 score)) +test-epsilon+)
         (format nil "Perfect superdiagonal gives 100%%, got ~,2F%%" score))))
 
@@ -2371,8 +2373,10 @@ threshold = best_mean + best_std / sqrt(k)"
          (n-modes 3)
          (core (make-array 8 :element-type 'double-float
                            :initial-element 0.0d0))
+         (lambda-vec (make-array 2 :element-type 'double-float
+                                   :initial-contents '(1.0d0 1.0d0)))
          (score (cl-tensor-decomposition::%compute-corcondia-from-core
-                 core rank n-modes)))
+                 core rank n-modes lambda-vec)))
     ;; Score = 100 * (1 - (2*1^2)/2) = 100 * (1 - 1) = 0
     (ok (< (abs score) +test-epsilon+)
         (format nil "All-zero core gives 0%%, got ~,2F%%" score))))
@@ -2385,8 +2389,10 @@ threshold = best_mean + best_std / sqrt(k)"
          (core (make-array 8 :element-type 'double-float
                            :initial-contents '(0.9d0 0.1d0 0.05d0 0.0d0
                                                0.0d0 0.1d0 0.0d0 0.95d0)))
+         (lambda-vec (make-array 2 :element-type 'double-float
+                                   :initial-contents '(1.0d0 1.0d0)))
          (score (cl-tensor-decomposition::%compute-corcondia-from-core
-                 core rank n-modes)))
+                 core rank n-modes lambda-vec)))
     (ok (> score 50.0d0) "Score > 50% for mostly superdiagonal")
     (ok (< score 100.0d0) "Score < 100% due to noise")))
 
