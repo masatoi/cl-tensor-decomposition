@@ -2418,15 +2418,18 @@ threshold = best_mean + best_std / sqrt(k)"
                                                  1.0d0 6.0d0 7.0d0
                                                  2.0d0)))
          (tensor (cltd:make-sparse-tensor shape indices values)))
-    ;; Decompose with rank 2 and rank 3
-    (let* ((factors-r2 (cltd:decomposition tensor :r 2 :n-cycle 100))
-           (factors-r3 (cltd:decomposition tensor :r 3 :n-cycle 100))
-           (score-r2 (cltd:corcondia tensor factors-r2))
-           (score-r3 (cltd:corcondia tensor factors-r3)))
-      ;; Lower rank should generally have higher CORCONDIA
-      ;; (indicating better superdiagonal structure)
-      (ok (> score-r2 score-r3)
-          (format nil "Rank 2 (~,1F%%) > Rank 3 (~,1F%%)" score-r2 score-r3)))))
+    ;; Use fixed random seed for deterministic results
+    (let ((*random-state* (cltd:%seed-random-state 42)))
+      ;; Decompose with rank 2 and rank 3
+      (let* ((factors-r2 (cltd:decomposition tensor :r 2 :n-cycle 100))
+             (factors-r3 (let ((*random-state* (cltd:%seed-random-state 42)))
+                           (cltd:decomposition tensor :r 3 :n-cycle 100)))
+             (score-r2 (cltd:corcondia tensor factors-r2))
+             (score-r3 (cltd:corcondia tensor factors-r3)))
+        ;; Lower rank should generally have higher CORCONDIA
+        ;; (indicating better superdiagonal structure)
+        (ok (> score-r2 score-r3)
+            (format nil "Rank 2 (~,1F%%) > Rank 3 (~,1F%%)" score-r2 score-r3))))))
 
 (deftest corcondia-verbose-output
   "CORCONDIA with verbose=t prints diagnostic information."
