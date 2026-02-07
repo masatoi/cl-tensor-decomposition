@@ -4,6 +4,18 @@
 ;;; CORCONDIA (Core Consistency Diagnostic) Implementation
 ;;; ============================================================
 ;;;
+;;; *** EXPERIMENTAL IMPLEMENTATION ***
+;;;
+;;; WARNING: This implementation is designed for DENSE tensors.
+;;; Results on SPARSE tensors are unreliable and should not be
+;;; used for model selection. Use cross-validation with the 1-SE
+;;; rule (select-rank-1se) for sparse tensor rank selection.
+;;;
+;;; Empirical testing shows that CORCONDIA on sparse tensors:
+;;;   - May give high scores for under-fitted models
+;;;   - May give low/zero scores for correctly-fitted models
+;;;   - Does not reliably identify the true rank
+;;;
 ;;; Reference:
 ;;;   Bro, R., & Kiers, H. A. (2003). A new efficient method for
 ;;;   determining the number of components in PARAFAC models.
@@ -16,8 +28,11 @@
 ;;; Algorithm:
 ;;;   1. Compute pseudo-inverse A⁺ of each factor matrix A
 ;;;   2. Compute core tensor: G = X ×₁ A₁⁺ ×₂ A₂⁺ ... ×ₙ Aₙ⁺
-;;;   3. Compare G with ideal superdiagonal tensor T (T_{rr...r} = 1)
-;;;   4. CORCONDIA = 100 × (1 - ||G - T||² / R)
+;;;   3. Compare G with ideal superdiagonal tensor T (T_{rr...r} = λ_r)
+;;;   4. CORCONDIA = 100 × (1 - ||G - T||² / ||T||²)
+
+;; Export corcondia symbol from this subsystem
+(export '(corcondia) :cl-tensor-decomposition)
 
 ;;; ============================================================
 ;;; Matrix Operations for Pseudo-Inverse Computation
@@ -327,7 +342,12 @@ where the sum is over all core tensor elements."
 
 (defun corcondia (tensor factor-matrix-vector
                   &key (epsilon 1.0d-12) verbose)
-  "Compute CORCONDIA (Core Consistency Diagnostic) for a CP decomposition.
+  "EXPERIMENTAL: Compute CORCONDIA (Core Consistency Diagnostic) for CP decomposition.
+
+*** WARNING: NOT RECOMMENDED FOR SPARSE TENSORS ***
+This implementation is designed for dense tensors. On sparse tensors,
+results are unreliable and may incorrectly favor under-fitted models.
+Use SELECT-RANK-1SE (cross-validation with 1-SE rule) for sparse data.
 
 TENSOR is a sparse-tensor structure containing the original data.
 FACTOR-MATRIX-VECTOR is a vector of factor matrices from CP decomposition,
