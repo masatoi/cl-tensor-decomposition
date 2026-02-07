@@ -13,6 +13,7 @@
            :make-fold-splits
            :cross-validate-rank
            :select-rank
+           :select-rank-1se
            ;; sparse-tensor structure and accessors
            :sparse-tensor
            :make-sparse-tensor

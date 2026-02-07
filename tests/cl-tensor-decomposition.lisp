@@ -2108,3 +2108,127 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
   ;; x-tensor has no aux data set
   (ok (null (cltd:sparse-tensor-aux x-tensor))
       "sparse-tensor-aux returns NIL for tensor without aux data"))
+
+
+;;; ============================================================
+;;; select-rank-1se tests
+;;; ============================================================
+
+(deftest select-rank-1se-returns-expected-structure
+  "select-rank-1se returns two values: selected result alist and full cv-results."
+  (let ((ranks '(1 2)))
+    (multiple-value-bind (selected all-results)
+        (cltd:select-rank-1se X-indices-matrix X-value-vector ranks
+                              :k 2
+                              :n-cycle 10
+                              :convergence-threshold 1d-4
+                              :convergence-window 3)
+      ;; First value should be an alist with expected keys
+      (ok (listp selected)
+          "Selected result is a list")
+      (ok (assoc :rank selected)
+          "Selected result has :rank key")
+      (ok (assoc :mean selected)
+          "Selected result has :mean key")
+      (ok (assoc :std selected)
+          "Selected result has :std key")
+      (ok (assoc :scores selected)
+          "Selected result has :scores key")
+      ;; Second value should be full results
+      (ok (= (length all-results) (length ranks))
+          "All-results has one entry per rank")
+      ;; Selected should be from the candidate ranks
+      (ok (member (cdr (assoc :rank selected)) ranks)
+          "Selected rank is from candidates"))))
+
+
+
+(deftest select-rank-1se-selects-smaller-or-equal-rank
+  "select-rank-1se should select a rank <= the rank selected by select-rank.
+
+The 1-SE rule favors simpler models, so when the best rank has high variance,
+1-SE may select a smaller rank that is within one standard error of the best."
+  (let* ((ranks '(1 2))
+         ;; Use a shared random state for both calls to ensure identical folds
+         (seed-state (make-random-state t)))
+    (multiple-value-bind (best-1se results-1se)
+        (cltd:select-rank-1se X-indices-matrix X-value-vector ranks
+                              :k 2
+                              :n-cycle 10
+                              :random-state (make-random-state seed-state)
+                              :convergence-threshold 1d-4
+                              :convergence-window 3)
+      (declare (ignore results-1se))
+      (multiple-value-bind (best-min results-min)
+          (cltd:select-rank X-indices-matrix X-value-vector ranks
+                            :k 2
+                            :n-cycle 10
+                            :random-state (make-random-state seed-state)
+                            :convergence-threshold 1d-4
+                            :convergence-window 3)
+        (declare (ignore results-min))
+        (let ((rank-1se (cdr (assoc :rank best-1se)))
+              (rank-min (cdr (assoc :rank best-min))))
+          ;; 1-SE should always select rank <= select-rank
+          ;; because it favors parsimony
+          (ok (<= rank-1se rank-min)
+              (format nil "1-SE rank (~D) <= min rank (~D)" rank-1se rank-min)))))))
+
+
+
+(deftest select-rank-1se-threshold-uses-standard-error
+  "Verify that 1-SE threshold uses std/sqrt(k), not raw std.
+
+This test uses fixed k=2 and verifies the threshold calculation:
+threshold = best_mean + best_std / sqrt(k)"
+  (let ((ranks '(1 2)))
+    (multiple-value-bind (selected cv-results)
+        (cltd:select-rank-1se X-indices-matrix X-value-vector ranks
+                              :k 2
+                              :n-cycle 10
+                              :convergence-threshold 1d-4
+                              :convergence-window 3)
+      ;; Find the best result (lowest mean)
+      (let* ((sorted (sort (copy-list cv-results) #'<
+                           :key (lambda (r) (cdr (assoc :mean r)))))
+             (best (first sorted))
+             (best-mean (cdr (assoc :mean best)))
+             (best-std (cdr (assoc :std best)))
+             ;; k=2, so sqrt(k) = sqrt(2)
+             (sqrt-k (sqrt 2.0d0))
+             (threshold (+ best-mean (/ best-std sqrt-k)))
+             (selected-mean (cdr (assoc :mean selected))))
+        ;; Selected result should have mean within threshold
+        (ok (<= selected-mean (+ threshold +test-epsilon+))
+            (format nil "Selected mean (~,6F) <= threshold (~,6F)"
+                    selected-mean threshold))))))
+
+
+(deftest select-rank-1se-selects-smallest-within-threshold
+  "When multiple ranks are within 1-SE threshold, select-rank-1se chooses smallest."
+  (let ((ranks '(1 2)))
+    (multiple-value-bind (selected cv-results)
+        (cltd:select-rank-1se X-indices-matrix X-value-vector ranks
+                              :k 2
+                              :n-cycle 10
+                              :convergence-threshold 1d-4
+                              :convergence-window 3)
+      ;; Find all ranks within threshold
+      (let* ((sorted (sort (copy-list cv-results) #'<
+                           :key (lambda (r) (cdr (assoc :mean r)))))
+             (best (first sorted))
+             (best-mean (cdr (assoc :mean best)))
+             (best-std (cdr (assoc :std best)))
+             (sqrt-k (sqrt 2.0d0))
+             (threshold (+ best-mean (/ best-std sqrt-k)))
+             (within-threshold
+               (remove-if (lambda (r)
+                            (> (cdr (assoc :mean r)) threshold))
+                          cv-results))
+             (smallest-rank
+               (reduce #'min within-threshold
+                       :key (lambda (r) (cdr (assoc :rank r)))))
+             (selected-rank (cdr (assoc :rank selected))))
+        (ok (= selected-rank smallest-rank)
+            (format nil "Selected smallest rank (~D) within threshold"
+                    selected-rank))))))
