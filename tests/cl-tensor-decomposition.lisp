@@ -2142,17 +2142,20 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
           "Selected rank is from candidates"))))
 
 
+
 (deftest select-rank-1se-selects-smaller-or-equal-rank
   "select-rank-1se should select a rank <= the rank selected by select-rank.
 
 The 1-SE rule favors simpler models, so when the best rank has high variance,
 1-SE may select a smaller rank that is within one standard error of the best."
-  (let ((ranks '(1 2)))
+  (let* ((ranks '(1 2))
+         ;; Use a shared random state for both calls to ensure identical folds
+         (seed-state (make-random-state t)))
     (multiple-value-bind (best-1se results-1se)
         (cltd:select-rank-1se X-indices-matrix X-value-vector ranks
                               :k 2
                               :n-cycle 10
-                              :random-state (make-random-state t)
+                              :random-state (make-random-state seed-state)
                               :convergence-threshold 1d-4
                               :convergence-window 3)
       (declare (ignore results-1se))
@@ -2160,7 +2163,7 @@ The 1-SE rule favors simpler models, so when the best rank has high variance,
           (cltd:select-rank X-indices-matrix X-value-vector ranks
                             :k 2
                             :n-cycle 10
-                            :random-state (make-random-state t)
+                            :random-state (make-random-state seed-state)
                             :convergence-threshold 1d-4
                             :convergence-window 3)
         (declare (ignore results-min))
@@ -2170,6 +2173,7 @@ The 1-SE rule favors simpler models, so when the best rank has high variance,
           ;; because it favors parsimony
           (ok (<= rank-1se rank-min)
               (format nil "1-SE rank (~D) <= min rank (~D)" rank-1se rank-min)))))))
+
 
 
 (deftest select-rank-1se-threshold-uses-standard-error
