@@ -434,31 +434,42 @@ DENOMINATOR-TMP      - Temporary storage for denominator computation"
 (defun decomposition-inner (n-cycle X-indices-matrix X-value-vector X^-value-vector
                             factor-matrix-vector numerator-tmp denominator-tmp
                             &key verbose convergence-threshold convergence-window)
-  "Iteratively update FACTOR-MATRIX-VECTOR up to N-CYCLE steps, honoring convergence controls."
-  (block done
-    (let* ((threshold (and convergence-threshold
-                           (coerce convergence-threshold 'double-float)))
-           (window (when threshold
-                     (let ((w (or convergence-window 5)))
-                       (when (or (null w) (<= w 0))
-                         (error "CONVERGENCE-WINDOW must be a positive integer."))
-                       w)))
-           (kl-buffer (when window
-                        (make-array window :element-type 'double-float :initial-element 0d0)))
-           (kl-count 0)
-           (kl-index 0)
-           (last-smooth nil)
-           (compute-kl? (or verbose threshold)))
+  "Iteratively update FACTOR-MATRIX-VECTOR up to N-CYCLE steps, honoring convergence controls.
+
+Returns four values:
+  1. Number of iterations executed
+  2. Final KL divergence value
+  3. Vector of KL divergence values at each iteration (loss history)
+  4. Boolean indicating whether convergence was achieved"
+  (let* ((threshold (and convergence-threshold
+                         (coerce convergence-threshold 'double-float)))
+         (window (when threshold
+                   (let ((w (or convergence-window 5)))
+                     (when (or (null w) (<= w 0))
+                       (error "CONVERGENCE-WINDOW must be a positive integer."))
+                     w)))
+         (kl-buffer (when window
+                      (make-array window :element-type 'double-float :initial-element 0d0)))
+         (kl-count 0)
+         (kl-index 0)
+         (last-smooth nil)
+         ;; Always collect KL history
+         (kl-history (make-array n-cycle :element-type 'double-float 
+                                 :initial-element 0d0 :adjustable t :fill-pointer 0))
+         (final-kl 0d0)
+         (converged-p nil))
+    (block done
       (loop for i from 0 below n-cycle do
         (sdot factor-matrix-vector X-indices-matrix X^-value-vector)
         (update X-indices-matrix X-value-vector X^-value-vector
-          factor-matrix-vector (mod i (length factor-matrix-vector)) numerator-tmp denominator-tmp)
-        (let ((kl-value (when compute-kl?
-                          (sparse-kl-divergence X-indices-matrix X-value-vector X^-value-vector))))
+                factor-matrix-vector (mod i (length factor-matrix-vector)) 
+                numerator-tmp denominator-tmp)
+        ;; Always compute KL divergence for history
+        (let ((kl-value (sparse-kl-divergence X-indices-matrix X-value-vector X^-value-vector)))
+          (vector-push-extend kl-value kl-history)
+          (setf final-kl kl-value)
           (when verbose
-            (format t "cycle: ~A, kl-divergence: ~A~%"
-                    (1+ i)
-                    kl-value))
+            (format t "cycle: ~A, kl-divergence: ~A~%" (1+ i) kl-value))
           (when threshold
             (setf (aref kl-buffer kl-index) kl-value)
             (setf kl-index (mod (1+ kl-index) window))
@@ -467,15 +478,16 @@ DENOMINATOR-TMP      - Temporary storage for denominator computation"
             (when (= kl-count window)
               (let ((smooth (/ (loop for idx from 0 below window
                                      sum (aref kl-buffer idx))
-                                window)))
+                               window)))
                 (when last-smooth
                   (let* ((delta (abs (- smooth last-smooth)))
                          (base (max (abs last-smooth) *epsilon*))
                          (ratio (/ delta base)))
                     (when (< ratio threshold)
-                      (return-from done (values (1+ i))))))
+                      (setf converged-p t)
+                      (return-from done (values (1+ i) final-kl kl-history converged-p)))))
                 (setf last-smooth smooth))))))
-      (values n-cycle))))
+      (values n-cycle final-kl kl-history converged-p))))
 
 (defstruct mode-spec
   "Metadata describing a single mode (dimension) of the tensor.
@@ -520,7 +532,12 @@ VERBOSE       - when true, emit per-iteration KL divergence logs; defaults to NI
 CONVERGENCE-THRESHOLD - optional relative tolerance for early stopping.
 CONVERGENCE-WINDOW    - smoothing window length; defaults to 5.
 
-Returns the factor-matrix vector and the number of iterations executed."
+Returns five values:
+  1. factor-matrix-vector - the decomposed factor matrices
+  2. iterations - number of iterations executed
+  3. final-kl - final KL divergence value
+  4. kl-history - vector of KL divergence at each iteration
+  5. converged-p - T if convergence threshold was reached, NIL otherwise"
   (let* ((x-shape (sparse-tensor-shape tensor))
          (indices (sparse-tensor-indices tensor))
          (values (sparse-tensor-values tensor))
@@ -543,12 +560,13 @@ Returns the factor-matrix vector and the number of iterations executed."
                       'double-float :initial-element 1.0d0)))
     (loop for factor-matrix across factor-matrix-vector
           do (initialize-random-matrix factor-matrix))
-    (multiple-value-bind (iterations)
+    (multiple-value-bind (iterations final-kl kl-history converged-p)
         (decomposition-inner n-cycle indices values x^-value-vector
-         factor-matrix-vector numerator-tmp denominator-tmp :verbose verbose
-         :convergence-threshold convergence-threshold :convergence-window
-         convergence-window)
-      (values factor-matrix-vector iterations))))
+                             factor-matrix-vector numerator-tmp denominator-tmp 
+                             :verbose verbose
+                             :convergence-threshold convergence-threshold 
+                             :convergence-window convergence-window)
+      (values factor-matrix-vector iterations final-kl kl-history converged-p))))
 
 (defun ranking (label-list factor-matrix r)
   "Return LABEL-LIST paired with weights from FACTOR-MATRIX column R, sorted descending."
