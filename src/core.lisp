@@ -10,7 +10,16 @@
            :decomposition
            :ranking
            :decomposition-inner
-           :make-fold-splits
+           ;; model selection via Poisson count thinning
+           :make-poisson-folds
+           :poisson-folds
+           :poisson-folds-p
+           :poisson-folds-k
+           :poisson-folds-count
+           :poisson-folds-tensor
+           :poisson-folds-prediction-scale
+           :poisson-fold-tensors
+           :normalized-generalized-kl
            :cross-validate-rank
            :select-rank
            :select-rank-1se
@@ -316,25 +325,31 @@ costs O(R * sum_m I_m) and never allocates a dense array."
           sum (aref masses ri)
           double-float)))
 
-(defun %sparse-kl-local-term (X-indices-matrix X-value-vector X^-value-vector)
+(defun %sparse-kl-local-term (X-indices-matrix X-value-vector X^-value-vector
+                              prediction-scale)
   "Accumulate the stored-non-zero part of the generalized KL divergence.
 
 Returns sum over the rows of X-INDICES-MATRIX of
 
-  x_i * log(x_i / (x^_i + *epsilon*)) - x_i
+  x_i * log(x_i / (s * x^_i + *epsilon*)) - x_i
 
-Entries whose observed value is zero contribute nothing here: for them the
-limit x*log(x/y) as x->0+ is 0, and their remaining -x + x^ part belongs to the
-total predicted mass, so adding it here would double-count it.
+where s is PREDICTION-SCALE. Entries whose observed value is zero contribute
+nothing here: for them the limit x*log(x/y) as x->0+ is 0, and their remaining
+-x + x^ part belongs to the total predicted mass, so adding it here would
+double-count it.
 
 The +x^ term is likewise omitted for every entry, since the total predicted
-mass already covers all coordinates including the stored ones."
+mass already covers all coordinates including the stored ones.
+
+*epsilon* is added after scaling, so the stabilizer keeps a fixed magnitude
+regardless of s."
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array fixnum) X-indices-matrix)
-           (type (simple-array double-float) X-value-vector X^-value-vector))
+           (type (simple-array double-float) X-value-vector X^-value-vector)
+           (type double-float prediction-scale))
   (loop for datum-index fixnum from 0 below (array-dimension X-indices-matrix 0)
         sum (let ((x (aref X-value-vector datum-index))
-                  (x^ (aref X^-value-vector datum-index)))
+                  (x^ (* prediction-scale (aref X^-value-vector datum-index))))
               (declare (type double-float x x^))
               (if (> x 0.0d0)
                   (- (* x (the double-float
@@ -344,7 +359,7 @@ mass already covers all coordinates including the stored ones."
         double-float))
 
 (defun sparse-kl-divergence (X-indices-matrix X-value-vector X^-value-vector
-                             factor-matrix-vector)
+                             factor-matrix-vector &key (prediction-scale 1.0d0))
   "Compute the generalized (Poisson) KL divergence between a sparse tensor and
 its CP reconstruction:
 
@@ -364,10 +379,17 @@ X-INDICES-MATRIX     - Sparse tensor indices, shape (nnz, n-modes)
 X-VALUE-VECTOR       - Observed counts at each stored index
 X^-VALUE-VECTOR      - Reconstruction at the stored indices, as produced by SDOT
 FACTOR-MATRIX-VECTOR - The factor matrices that produced X^-VALUE-VECTOR
+PREDICTION-SCALE     - Multiplier s applied to every prediction; defaults to 1
 
 X^-VALUE-VECTOR and FACTOR-MATRIX-VECTOR must describe the same model state;
 callers are responsible for calling SDOT before this function whenever the
 factors have changed.
+
+PREDICTION-SCALE exists for exposure correction: a model fitted on a thinned
+tensor predicts at the training exposure, and scoring it against a validation
+sample taken at a different exposure needs the ratio applied to the *whole*
+model. Both the per-entry predictions and the total predicted mass are scaled,
+so the identity D(X||s*X^) is preserved; the factor matrices are never mutated.
 
 Numerical stabilization: the logarithm divides by x^ + *epsilon* so that an
 underflowed reconstruction cannot produce -infinity or NaN. This biases the
@@ -378,8 +400,9 @@ otherwise scale with the number of coordinates in the tensor."
            (type (simple-array fixnum) X-indices-matrix)
            (type (simple-array double-float) X-value-vector X^-value-vector)
            (type simple-array factor-matrix-vector))
-  (+ (%sparse-kl-local-term X-indices-matrix X-value-vector X^-value-vector)
-     (%cp-total-mass factor-matrix-vector)))
+  (let ((scale (coerce prediction-scale 'double-float)))
+    (+ (%sparse-kl-local-term X-indices-matrix X-value-vector X^-value-vector scale)
+       (* scale (%cp-total-mass factor-matrix-vector)))))
 
 (defun calc-denominator (factor-matrix-vector factor-index denominator-tmp)
   "Compute the normalization denominator for multiplicative update.

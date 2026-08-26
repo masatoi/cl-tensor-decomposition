@@ -221,13 +221,14 @@ Higher values indicate the factor is more important for reconstruction."
                            double-float)))
     ;; Compute full reconstruction KL
     (sdot factor-matrix-vector x-indices-matrix x^-full)
-    (let ((kl-full (+ (%sparse-kl-local-term x-indices-matrix x-value-vector x^-full)
+    (let ((kl-full (+ (%sparse-kl-local-term x-indices-matrix x-value-vector x^-full
+                                             1.0d0)
                       total-mass)))
       ;; Compute KL without each factor
       (loop for factor-index from 0 below r do
         (sdot-excluding-factor factor-matrix-vector x-indices-matrix x^-partial factor-index)
         (let ((kl-partial (+ (%sparse-kl-local-term x-indices-matrix x-value-vector
-                                                    x^-partial)
+                                                    x^-partial 1.0d0)
                              (- total-mass (aref component-masses factor-index)))))
           (setf (aref contributions factor-index)
                 (- kl-partial kl-full)))))

@@ -118,31 +118,108 @@ Set `:convergence-threshold` to enable early stopping based on a moving-average 
 
 ## Rank Selection
 
-Use `select-rank` for k-fold cross-validation over candidate ranks:
+Use `select-rank` for k-fold cross-validation over candidate ranks. It takes the
+`sparse-tensor` itself, so the declared shape and the mode metadata survive into
+every fold:
 
 ```lisp
-(let ((indices (sparse-tensor-indices *tensor*))
-      (values (sparse-tensor-values *tensor*)))
-  (multiple-value-bind (best all-results)
-      (select-rank indices values
-                   '(5 10 15)
-                   :k 3
-                   :n-cycle 50
-                   :convergence-threshold 1d-4
-                   :convergence-window 5
-                   :random-state (make-random-state t))
-    (format t "Best rank: ~a with mean KL ~,5f~%"
-            (cdr (assoc :rank best))
-            (cdr (assoc :mean best)))
+(multiple-value-bind (best all-results)
+    (select-rank *tensor*
+                 '(5 10 15)
+                 :k 5
+                 :n-cycle 50
+                 :convergence-threshold 1d-4
+                 :convergence-window 5
+                 :random-state (make-random-state t))
+  (format t "Best rank: ~a with mean score ~,5f~%"
+          (cdr (assoc :rank best))
+          (cdr (assoc :mean best)))
 
-    ;; Run final decomposition with best rank
-    (decomposition *tensor*
-                   :r (cdr (assoc :rank best))
-                   :convergence-threshold 1d-4
-                   :convergence-window 5)))
+  ;; Run final decomposition with best rank
+  (decomposition *tensor*
+                 :r (cdr (assoc :rank best))
+                 :convergence-threshold 1d-4
+                 :convergence-window 5))
 ```
 
-`cross-validate-rank` returns detailed fold statistics if you need manual inspection; pass your own evaluation function to use RMSE/MAE.
+`cross-validate-rank` returns the same per-rank statistics if you want to inspect
+them yourself. Each entry carries `:rank`, `:mean`, `:std`, `:standard-error`,
+`:scores` and `:validation-counts`, in the order the ranks were given. Neither
+function sorts that list in place. `select-rank-1se` picks the smallest rank
+whose mean is within one standard error (`std / sqrt(k)`) of the best.
+
+### How the folds are built
+
+Counts are **not** split by coordinate. Holding out whole coordinates would be
+invalid here: an unstored coordinate is an observed zero, so the training tensor
+would present each held-out cell as a zero and the model would then be scored on
+recovering a positive count it was fitted to suppress.
+
+Instead every *event* is assigned to a fold uniformly at random — Poisson (
+multinomial) thinning:
+
+```
+(V_i^1, ..., V_i^k) | X_i  ~  Multinomial(X_i; 1/k, ..., 1/k)
+```
+
+Fold `f` trains on `T_i^f = X_i - V_i^f` and validates on `V_i^f`, so the same
+cell appears in both halves. Under Poisson thinning the two halves are
+independent Poisson samples. Training exposure is `(k-1)/k`, validation exposure
+is `1/k`.
+
+Because the fit sees the training exposure, validation predictions are scaled by
+the exposure ratio `s = 1/(k-1)` — applied to the stored-coordinate predictions
+*and* to the model's total predicted mass, via
+`(sparse-kl-divergence ... :prediction-scale s)`.
+
+The default fold score is the generalized KL per validation event:
+
+```
+score_f = D(V^f || s * T^^f) / sum_i V_i^f
+```
+
+Lower is better. This is not the Poisson deviance — the deviance is twice this.
+
+This requires **non-negative integer counts**; fractional values are rejected
+rather than truncated. `k` must be at least 2 and at most the total count, but it
+is *not* bounded by the number of stored non-zeros: a single cell holding 100
+events splits into 5 folds perfectly well.
+
+`make-poisson-folds` exposes the split directly if you need it:
+
+```lisp
+(let ((folds (make-poisson-folds *tensor* 5 :random-state (make-random-state t))))
+  (poisson-folds-prediction-scale folds)      ; => 0.25d0
+  (multiple-value-bind (train valid train-total valid-total)
+      (poisson-fold-tensors folds 0)
+    ...))
+```
+
+### Custom fold metrics
+
+`:evaluation-function` receives everything a metric needs to apply the exposure
+correction itself:
+
+```lisp
+(lambda (validation-tensor approximation factor-matrix-vector
+         prediction-scale validation-count)
+  ...)
+```
+
+`approximation` holds the reconstruction at the validation coordinates *at the
+training exposure*, so a metric that compares against `validation-count` must
+scale it by `prediction-scale`. The default, `normalized-generalized-kl`, does
+exactly that.
+
+### Reproducibility
+
+A single `:random-state` drives both the thinning and each fold's factor
+initialization, and it is copied rather than advanced, so passing the same state
+twice gives identical results. The folds are drawn once and shared by every
+candidate rank, and each fold's initialization is fixed in advance, so reordering
+`ranks` cannot change any rank's scores.
+
+Nothing is printed unless `:verbose t`.
 
 ### Model of a sparse tensor
 A sparse tensor consists of pairs of non-zero values and indices.
@@ -187,8 +264,10 @@ argument:
 ```
 
 `x-hat` and `factors` must describe the same model state, so call `sdot` after
-every factor update. Custom `:evaluation-function` arguments to
-`cross-validate-rank` / `select-rank` receive the same four arguments.
+every factor update. The optional `:prediction-scale` multiplies every
+prediction — both the stored-coordinate values and the total mass — which is how
+cross-validation corrects for the exposure difference between a fold's training
+and validation halves.
 
 The logarithm divides by `x^ + *epsilon*` so an underflowed reconstruction
 cannot yield `-infinity`; `*epsilon*` is not added to the total predicted mass.

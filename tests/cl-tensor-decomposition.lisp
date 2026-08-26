@@ -19,6 +19,18 @@
 
 (defparameter +test-epsilon+ 1d-6)
 
+;; Cross-validation splits counts, not coordinates, so its fixture needs enough
+;; events per cell to fill several folds. Shape is deliberately wider than the
+;; observed maxima so fold tensors can be checked for shape preservation.
+(defparameter CV-tensor
+  (cltd:make-sparse-tensor
+   '(3 4 2)
+   (make-array '(6 3) :element-type 'fixnum
+               :initial-contents '((0 0 0) (1 1 1) (2 2 0)
+                                   (0 3 1) (1 0 1) (2 1 0)))
+   (make-array 6 :element-type 'double-float
+               :initial-contents '(12d0 8d0 15d0 6d0 20d0 9d0))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Generalized KL divergence over implicit zeros
 ;;;
@@ -57,11 +69,13 @@
         double-float))
 
 (defun %dense-generalized-kl (shape factor-matrix-vector indices values
-                              &optional (epsilon cltd::*epsilon*))
-  "Reference generalized KL computed by enumerating the whole dense tensor (test-only)."
+                              &optional (epsilon cltd::*epsilon*) (scale 1d0))
+  "Reference generalized KL computed by enumerating the whole dense tensor (test-only).
+SCALE multiplies every prediction, mirroring the exposure correction applied
+during cross-validation; EPSILON is added after scaling, never scaled itself."
   (loop for coord in (%all-coordinates shape)
         sum (let ((x (%sparse-lookup indices values coord))
-                  (x-hat (%cp-predict factor-matrix-vector coord)))
+                  (x-hat (* scale (%cp-predict factor-matrix-vector coord))))
               (+ (if (> x 0d0)
                      (* x (log (/ x (+ x-hat epsilon))))
                      0d0)
@@ -216,30 +230,17 @@
     (ok (< iterations 100) "Convergence threshold stops early")
     (ok (>= iterations 3) "At least window iterations executed")))
 
-(deftest make-fold-splits-cover-all-indices
-  (let* ((random-state (make-random-state t))
-         (splits (cltd:make-fold-splits X-indices-matrix X-value-vector 2
-                                        :random-state random-state)))
-    (ok (= (length splits) 2) "Two folds generated")
-    (let ((all-indices (sort (copy-list (apply #'append splits)) #'<)))
-      (ok (equal all-indices '(0 1 2)) "All indices covered exactly once")))
-  ;; The manual search below is compared against SELECT-RANK, so both runs must
-  ;; see identical randomness: :RANDOM-STATE seeds the fold splits, while the
-  ;; initial factor matrices come from *RANDOM-STATE* and the validation score
-  ;; depends on the factors they converge to.
+(deftest select-rank-matches-manual-search
+  "SELECT-RANK returns the lowest-mean entry of the results it also returns."
   (let* ((ranks '(1 2))
-         (seed (make-random-state t))
-         (cv-results (let ((*random-state* (make-random-state seed)))
-                       (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
-                                                 :k 2
-                                                 :n-cycle 10
-                                                 :random-state (make-random-state seed)
-                                                 :convergence-threshold 1d-4
-                                                 :convergence-window 3)))
+         (cv-results (cltd:cross-validate-rank CV-tensor ranks
+                                               :k 3
+                                               :n-cycle 10
+                                               :random-state (cltd:%seed-random-state 31)))
          (best-rank nil)
          (best-mean most-positive-double-float))
     (ok (= (length cv-results) (length ranks))
-        "Cross-validation returns entry per rank")
+        "Cross-validation returns one entry per rank")
     (dolist (result cv-results)
       (let ((rank (cdr (assoc :rank result)))
             (mean (cdr (assoc :mean result))))
@@ -247,13 +248,10 @@
           (setf best-mean mean
                 best-rank rank))))
     (multiple-value-bind (best all-results)
-        (let ((*random-state* (make-random-state seed)))
-          (cltd:select-rank X-indices-matrix X-value-vector ranks
-                            :k 2
-                            :n-cycle 10
-                            :random-state (make-random-state seed)
-                            :convergence-threshold 1d-4
-                            :convergence-window 3))
+        (cltd:select-rank CV-tensor ranks
+                          :k 3
+                          :n-cycle 10
+                          :random-state (cltd:%seed-random-state 31))
       (ok (= (length all-results) (length ranks))
           "select-rank echoes full results")
       (ok (member (cdr (assoc :rank best)) ranks)
@@ -261,97 +259,188 @@
       (ok (= (cdr (assoc :rank best)) best-rank)
           "select-rank matches manual search"))))
 
-(deftest cross-validate-rank-handles-fold-shapes
-  (let* ((ranks '(2))
-         (results (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
-                                            :k 5
-                                            :n-cycle 5
-                                            :random-state (make-random-state t))))
-    (let* ((result (first results))
-           (scores (cdr (assoc :scores result))))
-      (ok (= (length scores) 5) "k greater than nnz yields score per fold")
-      (ok (every #'numberp scores) "scores remain numeric even for empty folds")))
-  (let* ((results (cltd:cross-validate-rank X-indices-matrix X-value-vector '(1)
-                                            :k 1
-                                            :n-cycle 5
-                                            :random-state (make-random-state t)))
-         (scores (cdr (assoc :scores (first results)))))
-    (ok (= (length scores) 1) "k = 1 degenerates to single fold")
-    (ok (every #'numberp scores) "Single-fold score is numeric")))
+(deftest cross-validate-rank-rejects-degenerate-fold-counts
+  "k must leave something to validate against, and cannot exceed the event count."
+  (ok (handler-case (progn (cltd:cross-validate-rank CV-tensor '(1) :k 1 :n-cycle 5) nil)
+        (cltd:invalid-input-error () t))
+      "k = 1 is rejected rather than degenerating to a single fold")
+  (let ((tiny (cltd:make-sparse-tensor
+               '(2 2)
+               (make-array '(1 2) :element-type 'fixnum :initial-contents '((0 0)))
+               (make-array 1 :element-type 'double-float :initial-contents '(3d0)))))
+    (ok (handler-case (progn (cltd:cross-validate-rank tiny '(1) :k 5 :n-cycle 5) nil)
+          (cltd:invalid-input-error () t))
+        "k greater than the total count is rejected")))
+
+(deftest cross-validate-rank-scores-are-finite
+  "Every fold score is a finite double-float."
+  (let ((results (cltd:cross-validate-rank CV-tensor '(1 2)
+                                           :k 3
+                                           :n-cycle 10
+                                           :random-state (cltd:%seed-random-state 5))))
+    (dolist (result results)
+      (dolist (score (cdr (assoc :scores result)))
+        (ok (typep score 'double-float)
+            (format nil "rank ~D fold score is a double-float"
+                    (cdr (assoc :rank result))))
+        (ok (and (not (cltd:%float-nan-p score))
+                 (not (cltd:%float-infinity-p score)))
+            (format nil "rank ~D fold score ~,6F is finite"
+                    (cdr (assoc :rank result)) score))))))
 
 (deftest cross-validate-rank-is-reproducible-with-same-random-state
-  ;; :RANDOM-STATE only seeds the fold splits; the initial factor matrices are
-  ;; drawn from *RANDOM-STATE*. Since the validation score depends on the fitted
-  ;; factors (its total predicted mass does), both sources must be pinned to
-  ;; compare two runs exactly.
-  (let* ((seed (make-random-state t))
-         (ranks '(1 2))
-         (first-run (let ((*random-state* (make-random-state seed)))
-                      (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
-                                                :k 3
-                                                :n-cycle 10
-                                                :random-state (make-random-state seed))))
-         (second-run (let ((*random-state* (make-random-state seed)))
-                       (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
-                                                 :k 3
-                                                 :n-cycle 10
-                                                 :random-state (make-random-state seed))))
-         (no-seed (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
-                                            :k 3
-                                            :n-cycle 10)))
+  "One random state drives both the thinning and the factor initialization."
+  (let ((first-run (cltd:cross-validate-rank CV-tensor '(1 2)
+                                             :k 3
+                                             :n-cycle 10
+                                             :random-state (cltd:%seed-random-state 77)))
+        (second-run (cltd:cross-validate-rank CV-tensor '(1 2)
+                                              :k 3
+                                              :n-cycle 10
+                                              :random-state (cltd:%seed-random-state 77))))
     (ok (equalp first-run second-run)
-        "Providing the same random-state reproduces fold scores")
-    (ok (= (length no-seed) (length ranks))
-        "Cross-validation still returns results without random-state")))
+        "The same seed reproduces folds and scores exactly")))
+
+(deftest cross-validate-rank-does-not-advance-caller-random-state
+  "The supplied random state is copied, never advanced as a side effect."
+  (let* ((state (cltd:%seed-random-state 4321))
+         (first-run (cltd:cross-validate-rank CV-tensor '(1 2)
+                                              :k 3 :n-cycle 10 :random-state state))
+         (second-run (cltd:cross-validate-rank CV-tensor '(1 2)
+                                               :k 3 :n-cycle 10 :random-state state)))
+    (ok (equalp first-run second-run)
+        "Reusing the same state object yields identical results")))
+
+(deftest cross-validate-rank-is-independent-of-rank-order
+  "A rank's scores do not depend on where it appears in RANKS."
+  (let ((forward (cltd:cross-validate-rank CV-tensor '(1 2 3)
+                                           :k 3 :n-cycle 10
+                                           :random-state (cltd:%seed-random-state 909)))
+        (reversed (cltd:cross-validate-rank CV-tensor '(3 2 1)
+                                            :k 3 :n-cycle 10
+                                            :random-state (cltd:%seed-random-state 909))))
+    (ok (equal (mapcar (lambda (r) (cdr (assoc :rank r))) forward) '(1 2 3))
+        "Results keep the order of the input ranks")
+    (ok (equal (mapcar (lambda (r) (cdr (assoc :rank r))) reversed) '(3 2 1))
+        "Reversed input keeps its own order")
+    (dolist (rank '(1 2 3))
+      (let ((a (find rank forward :key (lambda (r) (cdr (assoc :rank r)))))
+            (b (find rank reversed :key (lambda (r) (cdr (assoc :rank r))))))
+        (ok (equalp (cdr (assoc :scores a)) (cdr (assoc :scores b)))
+            (format nil "rank ~D scores unchanged by rank ordering" rank))))))
+
+(deftest cross-validate-rank-is-quiet-unless-verbose
+  "Nothing reaches *STANDARD-OUTPUT* when VERBOSE is NIL."
+  (let ((output (with-output-to-string (*standard-output*)
+                  (cltd:cross-validate-rank CV-tensor '(1)
+                                            :k 2 :n-cycle 5
+                                            :random-state (cltd:%seed-random-state 3)))))
+    (ok (zerop (length output))
+        (format nil "verbose=nil produces no output (got ~D characters)"
+                (length output)))))
+
+(deftest cross-validate-rank-reports-validation-counts
+  "Each result carries the per-fold validation totals and a standard error."
+  (let* ((k 3)
+         (result (first (cltd:cross-validate-rank CV-tensor '(2)
+                                                  :k k :n-cycle 10
+                                                  :random-state (cltd:%seed-random-state 8))))
+         (counts (cdr (assoc :validation-counts result))))
+    (ok (assoc :standard-error result) "Result carries :standard-error")
+    (ok (< (abs (- (cdr (assoc :standard-error result))
+                   (/ (cdr (assoc :std result)) (sqrt (coerce k 'double-float)))))
+           1d-12)
+        "standard-error is std / sqrt(k)")
+    (ok (= (length counts) k) "One validation count per fold")
+    (ok (every #'plusp counts) "Every fold has a positive validation count")
+    (ok (= (reduce #'+ counts) 70)
+        "Validation counts across folds sum to the tensor's total count")))
 
 (deftest cross-validate-rank-respects-custom-evaluation-function
-  (labels ((always-42 (indices counts approx factor-matrices)
-             (declare (ignore indices counts approx factor-matrices))
-             42d0))
-    (let ((results (cltd:cross-validate-rank X-indices-matrix X-value-vector '(1 2)
-                                             :k 2
-                                             :n-cycle 5
-                                             :random-state (make-random-state t)
-                                             :evaluation-function #'always-42)))
-      (dolist (result results)
-        (let ((scores (cdr (assoc :scores result)))
-              (mean (cdr (assoc :mean result))))
-          (ok (every (lambda (score) (= score 42d0)) scores)
-              "Custom evaluation function overrides fold score computation")
-          (ok (= mean 42d0)
-              "Mean reflects custom evaluation metric"))))))
-
-(deftest cross-validate-rank-handles-unique-max-index
-  (let* ((unique-indices (make-array '(3 2) :element-type 'fixnum
-                                     :initial-contents '((0 0)
-                                                         (0 1)
-                                                         (1 2))))
-         (unique-counts (make-array 3 :element-type 'double-float
-                                    :initial-contents '(1d0 2d0 3d0))))
-    (ok (handler-case
-            (progn
-              (cltd:cross-validate-rank unique-indices unique-counts '(1)
-                                        :k 3
-                                        :n-cycle 5
-                                        :random-state (make-random-state t))
-              t)
-          (error (condition)
-            (declare (ignore condition))
-            nil))
-        "Cross-validation handles folds that hold out unique max index")))
+  "Custom metrics receive the validation tensor, reconstruction, factors, scale and count."
+  (let ((seen '()))
+    (labels ((probe (valid-tensor approximation factors scale valid-count)
+               (push (list (cltd:sparse-tensor-shape valid-tensor)
+                           (length approximation)
+                           (length factors)
+                           scale
+                           valid-count)
+                     seen)
+               42d0))
+      (let ((results (cltd:cross-validate-rank CV-tensor '(1 2)
+                                               :k 4
+                                               :n-cycle 5
+                                               :random-state (cltd:%seed-random-state 6)
+                                               :evaluation-function #'probe)))
+        (dolist (result results)
+          (ok (every (lambda (score) (= score 42d0)) (cdr (assoc :scores result)))
+              "Custom evaluation function overrides the fold score")
+          (ok (= (cdr (assoc :mean result)) 42d0)
+              "Mean reflects the custom metric"))
+        (ok (= (length seen) 8) "Called once per rank per fold")
+        (dolist (call seen)
+          (destructuring-bind (shape approx-length n-modes scale valid-count) call
+            (ok (equal shape '(3 4 2)) "Validation tensor keeps the original shape")
+            (ok (= n-modes 3) "Factor matrix vector has one matrix per mode")
+            (ok (< (abs (- scale (/ 1d0 3d0))) 1d-12)
+                "Prediction scale is 1/(k-1)")
+            (ok (and (plusp valid-count) (plusp approx-length))
+                "Validation count and reconstruction are non-empty")))))))
 
 (deftest select-rank-returns-expected-defaults
   (let ((default-ranks '(1 2)))
     (multiple-value-bind (default-best default-results)
-        (cltd:select-rank X-indices-matrix X-value-vector default-ranks
-                          :k 2
-                          :n-cycle 10
-                          :convergence-threshold 1d-4
-                          :convergence-window 3)
+        (cltd:select-rank CV-tensor default-ranks :k 3 :n-cycle 10)
       (ok (= (length default-results) (length default-ranks))
           "Default select-rank returns per-rank results")
       (ok (member (cdr (assoc :rank default-best)) default-ranks)
           "Default select-rank chooses rank from candidates"))))
+
+(deftest select-rank-does-not-mutate-results
+  "SELECT-RANK must not sort CV-RESULTS in place."
+  (let ((ranks '(3 1 2)))
+    (multiple-value-bind (best all-results)
+        (cltd:select-rank CV-tensor ranks
+                          :k 3 :n-cycle 10
+                          :random-state (cltd:%seed-random-state 17))
+      (ok (= (length all-results) (length ranks))
+          "All candidate ranks survive selection")
+      (ok (equal (mapcar (lambda (r) (cdr (assoc :rank r))) all-results) ranks)
+          "Results keep the input rank order")
+      (let ((minimum (reduce #'min all-results
+                             :key (lambda (r) (cdr (assoc :mean r))))))
+        (ok (< (abs (- (cdr (assoc :mean best)) minimum)) 1d-12)
+            "Selected result has the lowest mean")))))
+
+(deftest select-rank-breaks-ties-toward-the-smaller-rank
+  "With equal means the smaller rank wins, deterministically."
+  (labels ((constant-score (valid-tensor approximation factors scale valid-count)
+             (declare (ignore valid-tensor approximation factors scale valid-count))
+             1d0))
+    (multiple-value-bind (best all-results)
+        (cltd:select-rank CV-tensor '(3 1 2)
+                          :k 3 :n-cycle 5
+                          :random-state (cltd:%seed-random-state 23)
+                          :evaluation-function #'constant-score)
+      (ok (= (length all-results) 3) "All ranks reported")
+      (ok (= (cdr (assoc :rank best)) 1)
+          (format nil "Tie broken toward the smaller rank (got ~D)"
+                  (cdr (assoc :rank best)))))))
+
+(deftest cross-validate-rank-rejects-invalid-ranks
+  "RANKS must be a non-empty list of positive integers."
+  (ok (handler-case (progn (cltd:cross-validate-rank CV-tensor '() :k 3) nil)
+        (cltd:invalid-input-error () t))
+      "Empty rank list is rejected")
+  (ok (handler-case (progn (cltd:cross-validate-rank CV-tensor '(0) :k 3) nil)
+        (cltd:invalid-input-error () t))
+      "Rank 0 is rejected")
+  (ok (handler-case (progn (cltd:cross-validate-rank CV-tensor '(2 -1) :k 3) nil)
+        (cltd:invalid-input-error () t))
+      "Negative rank is rejected")
+  (ok (handler-case (progn (cltd:cross-validate-rank "not-a-tensor" '(1) :k 3) nil)
+        (cltd:invalid-input-error () t))
+      "A non-tensor first argument is rejected"))
 
 (deftest ensure-mode-specs-validates-metadata
   (let* ((mode0 (make-array '(2 1) :element-type 'double-float :initial-element 0.5d0))
@@ -2203,126 +2292,82 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
   "select-rank-1se returns two values: selected result alist and full cv-results."
   (let ((ranks '(1 2)))
     (multiple-value-bind (selected all-results)
-        (cltd:select-rank-1se X-indices-matrix X-value-vector ranks
-                              :k 2
-                              :n-cycle 10
-                              :convergence-threshold 1d-4
-                              :convergence-window 3)
-      ;; First value should be an alist with expected keys
-      (ok (listp selected)
-          "Selected result is a list")
-      (ok (assoc :rank selected)
-          "Selected result has :rank key")
-      (ok (assoc :mean selected)
-          "Selected result has :mean key")
-      (ok (assoc :std selected)
-          "Selected result has :std key")
-      (ok (assoc :scores selected)
-          "Selected result has :scores key")
-      ;; Second value should be full results
+        (cltd:select-rank-1se CV-tensor ranks
+                              :k 3 :n-cycle 10
+                              :random-state (cltd:%seed-random-state 51))
+      (dolist (key '(:rank :mean :std :standard-error :scores :validation-counts))
+        (ok (assoc key selected)
+            (format nil "Selected result has ~S key" key)))
       (ok (= (length all-results) (length ranks))
           "All-results has one entry per rank")
-      ;; Selected should be from the candidate ranks
+      (ok (equal (mapcar (lambda (r) (cdr (assoc :rank r))) all-results) ranks)
+          "All-results keeps the input rank order")
       (ok (member (cdr (assoc :rank selected)) ranks)
           "Selected rank is from candidates"))))
-
-
 
 (deftest select-rank-1se-selects-smaller-or-equal-rank
   "select-rank-1se should select a rank <= the rank selected by select-rank.
 
 The 1-SE rule favors simpler models, so when the best rank has high variance,
 1-SE may select a smaller rank that is within one standard error of the best."
-  ;; Both calls must see identical randomness: :RANDOM-STATE pins the folds, and
-  ;; binding *RANDOM-STATE* pins the initial factor matrices, which the
-  ;; validation score depends on.
-  (let* ((ranks '(1 2))
-         (seed-state (make-random-state t)))
+  (let ((ranks '(1 2))
+        (seed 88))
     (multiple-value-bind (best-1se results-1se)
-        (let ((*random-state* (make-random-state seed-state)))
-          (cltd:select-rank-1se X-indices-matrix X-value-vector ranks
-                                :k 2
-                                :n-cycle 10
-                                :random-state (make-random-state seed-state)
-                                :convergence-threshold 1d-4
-                                :convergence-window 3))
+        (cltd:select-rank-1se CV-tensor ranks
+                              :k 3 :n-cycle 10
+                              :random-state (cltd:%seed-random-state seed))
       (declare (ignore results-1se))
       (multiple-value-bind (best-min results-min)
-          (let ((*random-state* (make-random-state seed-state)))
-            (cltd:select-rank X-indices-matrix X-value-vector ranks
-                              :k 2
-                              :n-cycle 10
-                              :random-state (make-random-state seed-state)
-                              :convergence-threshold 1d-4
-                              :convergence-window 3))
+          (cltd:select-rank CV-tensor ranks
+                            :k 3 :n-cycle 10
+                            :random-state (cltd:%seed-random-state seed))
         (declare (ignore results-min))
         (let ((rank-1se (cdr (assoc :rank best-1se)))
               (rank-min (cdr (assoc :rank best-min))))
-          ;; 1-SE should always select rank <= select-rank
-          ;; because it favors parsimony
           (ok (<= rank-1se rank-min)
               (format nil "1-SE rank (~D) <= min rank (~D)" rank-1se rank-min)))))))
 
-
-
 (deftest select-rank-1se-threshold-uses-standard-error
-  "Verify that 1-SE threshold uses std/sqrt(k), not raw std.
-
-This test uses fixed k=2 and verifies the threshold calculation:
-threshold = best_mean + best_std / sqrt(k)"
+  "The 1-SE threshold uses std/sqrt(k), not the raw standard deviation."
   (let ((ranks '(1 2)))
     (multiple-value-bind (selected cv-results)
-        (cltd:select-rank-1se X-indices-matrix X-value-vector ranks
-                              :k 2
-                              :n-cycle 10
-                              :convergence-threshold 1d-4
-                              :convergence-window 3)
-      ;; Find the best result (lowest mean)
-      (let* ((sorted (sort (copy-list cv-results) #'<
-                           :key (lambda (r) (cdr (assoc :mean r)))))
-             (best (first sorted))
+        (cltd:select-rank-1se CV-tensor ranks
+                              :k 3 :n-cycle 10
+                              :random-state (cltd:%seed-random-state 64))
+      (let* ((best (reduce (lambda (a b)
+                             (if (<= (cdr (assoc :mean a)) (cdr (assoc :mean b))) a b))
+                           cv-results))
              (best-mean (cdr (assoc :mean best)))
-             (best-std (cdr (assoc :std best)))
-             ;; k=2, so sqrt(k) = sqrt(2)
-             (sqrt-k (sqrt 2.0d0))
-             (threshold (+ best-mean (/ best-std sqrt-k)))
+             (best-se (cdr (assoc :standard-error best)))
+             (threshold (+ best-mean best-se))
              (selected-mean (cdr (assoc :mean selected))))
-        ;; Selected result should have mean within threshold
+        (ok (< (abs (- best-se (/ (cdr (assoc :std best)) (sqrt 3.0d0)))) 1d-12)
+            "The reported standard error is std / sqrt(k)")
         (ok (<= selected-mean (+ threshold +test-epsilon+))
             (format nil "Selected mean (~,6F) <= threshold (~,6F)"
                     selected-mean threshold))))))
 
-
 (deftest select-rank-1se-selects-smallest-within-threshold
-  "When multiple ranks are within 1-SE threshold, select-rank-1se chooses smallest."
-  (let ((ranks '(1 2)))
+  "When multiple ranks are within the 1-SE threshold, the smallest is chosen."
+  (let ((ranks '(1 2 3)))
     (multiple-value-bind (selected cv-results)
-        (cltd:select-rank-1se X-indices-matrix X-value-vector ranks
-                              :k 2
-                              :n-cycle 10
-                              :convergence-threshold 1d-4
-                              :convergence-window 3)
-      ;; Find all ranks within threshold
-      (let* ((sorted (sort (copy-list cv-results) #'<
-                           :key (lambda (r) (cdr (assoc :mean r)))))
-             (best (first sorted))
-             (best-mean (cdr (assoc :mean best)))
-             (best-std (cdr (assoc :std best)))
-             (sqrt-k (sqrt 2.0d0))
-             (threshold (+ best-mean (/ best-std sqrt-k)))
-             (within-threshold
-               (remove-if (lambda (r)
-                            (> (cdr (assoc :mean r)) threshold))
-                          cv-results))
-             (smallest-rank
-               (reduce #'min within-threshold
-                       :key (lambda (r) (cdr (assoc :rank r)))))
-             (selected-rank (cdr (assoc :rank selected))))
-        (ok (= selected-rank smallest-rank)
+        (cltd:select-rank-1se CV-tensor ranks
+                              :k 3 :n-cycle 10
+                              :random-state (cltd:%seed-random-state 72))
+      (let* ((best (reduce (lambda (a b)
+                             (if (<= (cdr (assoc :mean a)) (cdr (assoc :mean b))) a b))
+                           cv-results))
+             (threshold (+ (cdr (assoc :mean best))
+                           (cdr (assoc :standard-error best))))
+             (within (remove-if (lambda (r) (> (cdr (assoc :mean r)) threshold))
+                                cv-results))
+             (smallest-rank (reduce #'min within
+                                    :key (lambda (r) (cdr (assoc :rank r))))))
+        (ok (= (cdr (assoc :rank selected)) smallest-rank)
             (format nil "Selected smallest rank (~D) within threshold"
-                    selected-rank))))))
-
-
+                    (cdr (assoc :rank selected))))
+        (ok (= (length cv-results) (length ranks))
+            "1-SE selection leaves the result list intact")))))
 (deftest sparse-kl-divergence-includes-implicit-zero-mass
   "Every coordinate of a 2x2 rank-1 model predicts 2, so the total mass is 8."
   (let* ((mode0 (make-array '(2 1) :element-type 'double-float
@@ -2450,3 +2495,310 @@ threshold = best_mean + best_std / sqrt(k)"
           (ok (< (abs (- (aref kl-history (1- (length kl-history))) recomputed))
                  1d-9)
               "Last kl-history entry equals KL recomputed from final factors"))))))
+
+
+;;; ---------------------------------------------------------------------------
+;;; Exposure correction: PREDICTION-SCALE
+;;; ---------------------------------------------------------------------------
+
+(deftest sparse-kl-divergence-scales-entries-and-total-mass
+  "PREDICTION-SCALE must scale the stored-entry predictions and the total mass."
+  (let* ((shape '(3 2 4))
+         (mode0 (make-array '(3 2) :element-type 'double-float
+                            :initial-contents '((0.7d0 0.2d0)
+                                                (0.1d0 0.9d0)
+                                                (0.4d0 0.5d0))))
+         (mode1 (make-array '(2 2) :element-type 'double-float
+                            :initial-contents '((1.3d0 0.6d0)
+                                                (0.8d0 1.1d0))))
+         (mode2 (make-array '(4 2) :element-type 'double-float
+                            :initial-contents '((0.3d0 1.2d0)
+                                                (0.9d0 0.4d0)
+                                                (1.5d0 0.7d0)
+                                                (0.2d0 0.8d0))))
+         (factors (make-array 3 :initial-contents (list mode0 mode1 mode2)))
+         (indices (make-array '(4 3) :element-type 'fixnum
+                              :initial-contents '((0 0 0) (1 1 2) (2 0 3) (0 1 1))))
+         (values (make-array 4 :element-type 'double-float
+                             :initial-contents '(2d0 5d0 1d0 3d0)))
+         (x-hat (make-array 4 :element-type 'double-float :initial-element 0d0))
+         (scale 0.25d0)
+         (mass-before (cltd::%cp-total-mass factors)))
+    (cltd:sdot factors indices x-hat)
+    (let ((scaled (cltd:sparse-kl-divergence indices values x-hat factors
+                                             :prediction-scale scale))
+          (dense (%dense-generalized-kl shape factors indices values
+                                        cltd::*epsilon* scale)))
+      (ok (< (abs (- scaled dense)) 1d-9)
+          (format nil "Scaled sparse KL ~,9F matches dense reference ~,9F"
+                  scaled dense)))
+    (ok (< (abs (- (cltd::%cp-total-mass factors) mass-before)) 1d-12)
+        "Factor matrices are not mutated by PREDICTION-SCALE")
+    (ok (< (abs (- (cltd:sparse-kl-divergence indices values x-hat factors
+                                              :prediction-scale 1d0)
+                   (cltd:sparse-kl-divergence indices values x-hat factors)))
+           1d-12)
+        "PREDICTION-SCALE defaults to 1 and leaves the unscaled result unchanged")))
+
+(deftest sparse-kl-divergence-does-not-scale-epsilon
+  "The stabilizing epsilon is added after scaling, so it is never scaled itself."
+  (let* ((factors (make-array 2 :initial-contents
+                              (list (make-array '(1 1) :element-type 'double-float
+                                                :initial-contents '((2d0)))
+                                    (make-array '(1 1) :element-type 'double-float
+                                                :initial-contents '((3d0))))))
+         (indices (make-array '(1 2) :element-type 'fixnum
+                              :initial-contents '((0 0))))
+         (values (make-array 1 :element-type 'double-float
+                             :initial-contents '(4d0)))
+         (x-hat (make-array 1 :element-type 'double-float :initial-element 0d0))
+         (scale 0.5d0))
+    (cltd:sdot factors indices x-hat)
+    (let ((expected (+ (- (* 4d0 (log (/ 4d0 (+ (* scale 6d0) cltd::*epsilon*))))
+                          4d0)
+                       (* scale 6d0))))
+      (ok (< (abs (- (cltd:sparse-kl-divergence indices values x-hat factors
+                                                :prediction-scale scale)
+                     expected))
+             1d-12)
+          (format nil "Epsilon applied after scaling (expected ~,12F)" expected)))))
+
+
+;;; ---------------------------------------------------------------------------
+;;; Poisson count thinning for cross-validation
+;;;
+;;; Folds split the *counts* at each coordinate, not the coordinates themselves,
+;;; so the same cell can appear in both the training and the validation tensor.
+;;; ---------------------------------------------------------------------------
+
+(defun %tensor-cell-table (tensor)
+  "Map each stored coordinate of TENSOR to its count (test-only)."
+  (let ((table (make-hash-table :test #'equal))
+        (idx (cltd:sparse-tensor-indices tensor))
+        (val (cltd:sparse-tensor-values tensor)))
+    (loop for row from 0 below (array-dimension idx 0)
+          do (setf (gethash (loop for m from 0 below (array-dimension idx 1)
+                                  collect (aref idx row m))
+                            table)
+                   (aref val row)))
+    table))
+
+(defun %cell-count (table coord)
+  (or (gethash coord table) 0d0))
+
+(defun %make-count-tensor ()
+  "A 4x3x2 tensor whose shape is deliberately larger than the observed maxima."
+  (cltd:make-sparse-tensor
+   '(4 3 2)
+   (make-array '(5 3) :element-type 'fixnum
+               :initial-contents '((0 0 0) (1 1 1) (2 0 1) (0 2 0) (1 0 0)))
+   (make-array 5 :element-type 'double-float
+               :initial-contents '(17d0 4d0 23d0 9d0 31d0))))
+
+(deftest poisson-folds-conserve-counts
+  "For every fold: train + validation = original, cell by cell."
+  (let* ((tensor (%make-count-tensor))
+         (original (%tensor-cell-table tensor))
+         (k 3)
+         (folds (cltd:make-poisson-folds tensor k
+                                         :random-state (cltd:%seed-random-state 4242)))
+         (validation-total (make-hash-table :test #'equal)))
+    (ok (= (cltd:poisson-folds-count folds) k)
+        "Requested number of folds is produced")
+    (dotimes (f k)
+      (multiple-value-bind (train valid) (cltd:poisson-fold-tensors folds f)
+        (let ((train-table (%tensor-cell-table train))
+              (valid-table (%tensor-cell-table valid)))
+          (maphash (lambda (coord count)
+                     (incf (gethash coord validation-total 0d0)
+                           (%cell-count valid-table coord))
+                     (ok (< (abs (- (+ (%cell-count train-table coord)
+                                       (%cell-count valid-table coord))
+                                    count))
+                            1d-12)
+                         (format nil "fold ~D cell ~A: train + valid = ~,1F" f coord count)))
+                   original)
+          (ok (every (lambda (v) (> v 0d0)) (cltd:sparse-tensor-values train))
+              (format nil "fold ~D training tensor stores no zero rows" f))
+          (ok (every (lambda (v) (> v 0d0)) (cltd:sparse-tensor-values valid))
+              (format nil "fold ~D validation tensor stores no zero rows" f)))))
+    (maphash (lambda (coord count)
+               (ok (< (abs (- (%cell-count validation-total coord) count)) 1d-12)
+                   (format nil "validation counts over all folds sum to ~,1F at ~A"
+                           count coord)))
+             original)
+    (let ((after (%tensor-cell-table tensor)))
+      (ok (block same
+            (maphash (lambda (coord count)
+                       (unless (= (%cell-count after coord) count)
+                         (return-from same nil)))
+                     original)
+            t)
+          "Input tensor is not modified by thinning"))))
+
+(deftest poisson-folds-preserve-shape
+  "Folds keep the original shape even when a mode value never appears in them."
+  (let* ((tensor (%make-count-tensor))
+         (folds (cltd:make-poisson-folds tensor 4
+                                         :random-state (cltd:%seed-random-state 7))))
+    (dotimes (f 4)
+      (multiple-value-bind (train valid) (cltd:poisson-fold-tensors folds f)
+        (ok (equal (cltd:sparse-tensor-shape train) '(4 3 2))
+            (format nil "fold ~D training shape preserved" f))
+        (ok (equal (cltd:sparse-tensor-shape valid) '(4 3 2))
+            (format nil "fold ~D validation shape preserved" f))))))
+
+(deftest poisson-folds-split-counts-not-coordinates
+  "A single coordinate with a large count can still be split into k folds."
+  (let* ((tensor (cltd:make-sparse-tensor
+                  '(2 2)
+                  (make-array '(1 2) :element-type 'fixnum :initial-contents '((0 0)))
+                  (make-array 1 :element-type 'double-float :initial-contents '(200d0))))
+         (k 5)
+         (folds (cltd:make-poisson-folds tensor k
+                                         :random-state (cltd:%seed-random-state 11)))
+         (total 0d0))
+    (ok (= (cltd:poisson-folds-count folds) k)
+        "k > nnz is accepted when k <= total count")
+    (dotimes (f k)
+      (multiple-value-bind (train valid) (cltd:poisson-fold-tensors folds f)
+        (let ((tv (reduce #'+ (cltd:sparse-tensor-values train) :initial-value 0d0))
+              (vv (reduce #'+ (cltd:sparse-tensor-values valid) :initial-value 0d0)))
+          (incf total vv)
+          (ok (> tv 0d0) (format nil "fold ~D has a positive training count" f))
+          (ok (> vv 0d0) (format nil "fold ~D has a positive validation count" f)))))
+    (ok (< (abs (- total 200d0)) 1d-12)
+        "Validation counts across folds recover the original count")))
+
+(deftest poisson-folds-are-reproducible-and-non-destructive
+  "The same seed reproduces the folds, and the caller's random state is untouched."
+  (let* ((tensor (%make-count-tensor))
+         (state (cltd:%seed-random-state 999))
+         (first-run (cltd:make-poisson-folds tensor 3 :random-state state))
+         (second-run (cltd:make-poisson-folds tensor 3 :random-state state)))
+    (ok (equalp (cltd::poisson-folds-validation-counts first-run)
+                (cltd::poisson-folds-validation-counts second-run))
+        "Repeated calls with the same state object produce identical folds")
+    (let ((fresh (cltd:make-poisson-folds tensor 3
+                                          :random-state (cltd:%seed-random-state 999))))
+      (ok (equalp (cltd::poisson-folds-validation-counts first-run)
+                  (cltd::poisson-folds-validation-counts fresh))
+          "A fresh state from the same seed reproduces the folds"))))
+
+(deftest poisson-folds-reject-invalid-input
+  "Thinning validates k and the count values."
+  (let ((tensor (%make-count-tensor)))
+    (ok (handler-case (progn (cltd:make-poisson-folds tensor 1) nil)
+          (cltd:invalid-input-error () t))
+        "k = 1 is rejected")
+    (ok (handler-case (progn (cltd:make-poisson-folds tensor 0) nil)
+          (cltd:invalid-input-error () t))
+        "k = 0 is rejected"))
+  (let ((fractional (cltd:make-sparse-tensor
+                     '(2 2)
+                     (make-array '(1 2) :element-type 'fixnum :initial-contents '((0 0)))
+                     (make-array 1 :element-type 'double-float :initial-contents '(2.5d0)))))
+    (ok (handler-case (progn (cltd:make-poisson-folds fractional 2) nil)
+          (cltd:invalid-input-error () t))
+        "Fractional counts are rejected"))
+  (let ((zero (cltd:make-sparse-tensor
+               '(2 2)
+               (make-array '(1 2) :element-type 'fixnum :initial-contents '((0 0)))
+               (make-array 1 :element-type 'double-float :initial-contents '(0d0)))))
+    (ok (handler-case (progn (cltd:make-poisson-folds zero 2) nil)
+          (cltd:invalid-input-error () t))
+        "A tensor with zero total count is rejected"))
+  (let ((tiny (cltd:make-sparse-tensor
+               '(2 2)
+               (make-array '(1 2) :element-type 'fixnum :initial-contents '((0 0)))
+               (make-array 1 :element-type 'double-float :initial-contents '(3d0)))))
+    (ok (handler-case (progn (cltd:make-poisson-folds tiny 5) nil)
+          (cltd:invalid-input-error () t))
+        "k greater than the total count is rejected")))
+
+;;; ---------------------------------------------------------------------------
+;;; Exposure correction and fold scoring
+;;; ---------------------------------------------------------------------------
+
+(deftest poisson-folds-prediction-scale-is-exposure-ratio
+  "Training exposure is (k-1)/k and validation exposure 1/k, so the ratio is 1/(k-1)."
+  (dolist (k '(2 3 5 10))
+    (let ((folds (cltd:make-poisson-folds CV-tensor k
+                                          :random-state (cltd:%seed-random-state 1))))
+      (ok (< (abs (- (cltd:poisson-folds-prediction-scale folds)
+                     (/ 1d0 (coerce (1- k) 'double-float))))
+             1d-12)
+          (format nil "k=~D gives prediction scale 1/~D" k (1- k))))))
+
+(deftest normalized-generalized-kl-matches-scaled-dense-reference
+  "The fold score is the exposure-scaled generalized KL per validation event.
+
+Comparing against a dense enumeration checks in one shot that the scale reaches
+both the stored-entry predictions and the predicted mass on the implicit zeros."
+  (let* ((shape '(3 4))
+         (mode0 (make-array '(3 2) :element-type 'double-float
+                            :initial-contents '((0.8d0 0.3d0)
+                                                (0.2d0 1.1d0)
+                                                (0.5d0 0.6d0))))
+         (mode1 (make-array '(4 2) :element-type 'double-float
+                            :initial-contents '((1.2d0 0.4d0)
+                                                (0.7d0 0.9d0)
+                                                (0.3d0 1.4d0)
+                                                (1.0d0 0.2d0))))
+         (factors (make-array 2 :initial-contents (list mode0 mode1)))
+         (indices (make-array '(3 2) :element-type 'fixnum
+                              :initial-contents '((0 0) (1 2) (2 1))))
+         (values (make-array 3 :element-type 'double-float
+                             :initial-contents '(4d0 7d0 2d0)))
+         (valid-tensor (cltd:make-sparse-tensor shape indices values))
+         (approximation (make-array 3 :element-type 'double-float :initial-element 0d0))
+         (scale (/ 1d0 4d0))                ; k = 5
+         (valid-count 13d0))
+    (cltd:sdot factors indices approximation)
+    (let ((score (cltd:normalized-generalized-kl valid-tensor approximation factors
+                                                 scale valid-count))
+          (reference (/ (%dense-generalized-kl shape factors indices values
+                                               cltd::*epsilon* scale)
+                        valid-count)))
+      (ok (< (abs (- score reference)) 1d-9)
+          (format nil "Fold score ~,9F matches scaled dense reference ~,9F"
+                  score reference)))
+    (ok (< (abs (- (cltd:normalized-generalized-kl valid-tensor approximation factors
+                                                   scale valid-count)
+                   (/ (cltd:sparse-kl-divergence indices values approximation factors
+                                                 :prediction-scale scale)
+                      valid-count)))
+           1d-12)
+        "Fold score is the raw generalized KL divided by the validation count")))
+
+(deftest fold-score-includes-implicit-zero-mass
+  "The predicted mass on unstored coordinates is part of the fold score."
+  (let* ((shape '(2 2))
+         (mode0 (make-array '(2 1) :element-type 'double-float
+                            :initial-contents '((2d0) (2d0))))
+         (mode1 (make-array '(2 1) :element-type 'double-float
+                            :initial-contents '((1d0) (1d0))))
+         (factors (make-array 2 :initial-contents (list mode0 mode1)))
+         (indices (make-array '(1 2) :element-type 'fixnum :initial-contents '((0 0))))
+         (values (make-array 1 :element-type 'double-float :initial-contents '(1d0)))
+         (valid-tensor (cltd:make-sparse-tensor shape indices values))
+         (approximation (make-array 1 :element-type 'double-float :initial-element 0d0))
+         (scale 0.5d0))
+    (cltd:sdot factors indices approximation)
+    ;; Every coordinate predicts 2, so the total mass is 8 and the scaled mass 4.
+    ;; Only one coordinate is stored: an nnz-only score would see 1 of that mass.
+    (let* ((score (cltd:normalized-generalized-kl valid-tensor approximation factors
+                                                  scale 1d0))
+           (expected (+ 4d0 (log (/ 1d0 1d0)) -1d0))
+           ;; What a stored-coordinates-only score would report: the local term
+           ;; with its own +s*x^ back, and no mass from the three implicit zeros.
+           (stored-only (+ (* 1d0 (log (/ 1d0 (+ (* scale 2d0) cltd::*epsilon*))))
+                           -1d0
+                           (* scale 2d0))))
+      (ok (< (abs (- score expected)) 1d-5)
+          (format nil "Fold score ~,6F carries the mass of all four cells (~,6F)"
+                  score expected))
+      (ok (< (abs (- (- score stored-only) 3d0)) 1d-5)
+          (format nil "Fold score exceeds the stored-only value ~,6F by the ~
+                       scaled mass of the three implicit zeros (3.0)"
+                  stored-only)))))

@@ -1,288 +1,470 @@
 (in-package :cl-tensor-decomposition)
 
-(defun make-fold-splits (indices counts k &key (random-state *random-state*))
-  "Create K randomized fold splits for cross-validation.
+;;;; model-selection.lisp - Rank selection by Poisson count thinning.
+;;;;
+;;;; A coordinate that is absent from a sparse tensor is an observed zero, not a
+;;;; missing value, so holding out whole coordinates is not a valid split: the
+;;;; training tensor would present each held-out cell as a zero, and the model
+;;;; would then be scored on recovering a positive count it was fitted to
+;;;; suppress. Splitting the *counts* instead keeps every coordinate present in
+;;;; both halves and matches the Poisson model the decomposition assumes.
 
-INDICES is the sparse tensor index matrix (NNZ x N-MODES).
-COUNTS is the observation count vector (currently unused but kept for API consistency).
-K is the number of folds to create.
-RANDOM-STATE controls the random shuffling for reproducibility.
+;;; ============================================================
+;;; Count thinning
+;;; ============================================================
 
-Returns a list of K sublists, each containing observation indices for that fold.
-The observations are randomly shuffled before splitting to ensure unbiased folds."
-  (declare (ignore counts))
-  (let* ((nnz (array-dimension indices 0))
-         (order (make-array nnz :element-type 'fixnum)))
-    (loop for i from 0 below nnz do
-      (setf (aref order i) i))
-    (let ((*random-state* random-state))
-      (loop for i from 0 below nnz do
-        (let* ((j (+ i (random (- nnz i))))
-               (tmp (aref order i)))
-          (setf (aref order i) (aref order j))
-          (setf (aref order j) tmp))))
-    (loop with fold-size = (ceiling nnz k)
-          for fold-index from 0 below k collect
-            (loop for offset from (* fold-index fold-size)
-                  below (min nnz (* (1+ fold-index) fold-size))
-                  collect (aref order offset)))))
+(defstruct (poisson-folds (:constructor %make-poisson-folds))
+  "A set of K cross-validation folds produced by Poisson count thinning.
 
-(defun %subset-tensor (indices counts subset)
-  "Extract a subset of sparse tensor data by observation indices.
+TENSOR            - The original sparse-tensor, never modified
+K                 - Number of folds
+VALIDATION-COUNTS - (nnz x K) fixnum array; entry (i, f) is the number of
+                    events at stored coordinate i assigned to fold f
 
-INDICES is the full sparse tensor index matrix.
-COUNTS is the full observation count vector.
-SUBSET is a list of observation indices to extract.
+The fold tensors themselves are materialized on demand by POISSON-FOLD-TENSORS,
+so the retained memory is O(nnz * K) fixnums rather than K full copies."
+  (tensor nil :read-only t)
+  (k 0 :type fixnum :read-only t)
+  (validation-counts nil :type (simple-array fixnum (* *)) :read-only t))
 
-Returns two values:
-  1. New index matrix containing only the subset rows
-  2. New count vector containing only the subset values"
-  (let* ((subset-size (length subset))
-         (dimension (array-dimension indices 1))
-         (sub-indices (make-array (list subset-size dimension)
-                                  :element-type 'fixnum))
-         (sub-counts (make-array subset-size :element-type 'double-float)))
-    (loop for pos from 0 below subset-size
-          for original-index in subset do
-            (loop for dim from 0 below dimension do
-              (setf (aref sub-indices pos dim)
-                    (aref indices original-index dim)))
-            (setf (aref sub-counts pos)
-                  (coerce (aref counts original-index) 'double-float)))
-    (values sub-indices sub-counts)))
+(defun %count-value-as-integer (value position)
+  "Return VALUE as a non-negative integer count, or signal INVALID-INPUT-ERROR.
 
-(defun %tensor-dimensions (indices)
-  "Compute the maximum index value for each tensor mode.
+Counts are stored as double-floats, so this rejects fractional, negative and
+non-finite values rather than silently truncating them."
+  (when (%float-nan-p value)
+    (error 'invalid-input-error
+           :reason :nan-value
+           :details (format nil "count[~D] is NaN" position)))
+  (when (%float-infinity-p value)
+    (error 'invalid-input-error
+           :reason :infinite-value
+           :details (format nil "count[~D] is infinite" position)))
+  (when (< value 0.0d0)
+    (error 'invalid-input-error
+           :reason :negative-value
+           :details (format nil "count[~D]=~F is negative" position value)))
+  (let ((rounded (fround value)))
+    (unless (= rounded value)
+      (error 'invalid-input-error
+             :reason :non-integer-count
+             :details (format nil "count[~D]=~F is not an integer; Poisson thinning splits whole events"
+                              position value)))
+    (values (truncate rounded))))
 
-Returns a list of maximum indices (0-based) observed in each dimension.
-Used internally by %BUILD-SHAPE to infer tensor shape from sparse data."
-  (loop for dim from 0 below (array-dimension indices 1)
-        collect (loop for row from 0 below (array-dimension indices 0)
-                      maximize (aref indices row dim))))
+(defun %tensor-integer-counts (tensor)
+  "Return the counts of TENSOR as a fixnum vector, validating each value.
 
-(defun %build-shape (indices)
-  "Infer tensor shape from sparse index matrix.
-
-Returns a list of dimension sizes (1-based) by adding 1 to the maximum
-index observed in each dimension. Note: This may underestimate dimensions
-if some categories are unobserved in the data."
-  (mapcar #'1+ (%tensor-dimensions indices)))
-
-(defun %complement-subset (nnz subset)
-  "Compute the complement of a subset of observation indices.
-
-NNZ is the total number of observations.
-SUBSET is a list of indices to exclude.
-
-Returns a list of all indices from 0 to NNZ-1 that are NOT in SUBSET.
-Used to create training sets from validation fold indices."
-  (let ((mask (make-array nnz :element-type 'bit :initial-element 0)))
-    (dolist (idx subset)
-      (setf (aref mask idx) 1))
+Also signals INVALID-INPUT-ERROR when the tensor carries no events at all."
+  (let* ((values (sparse-tensor-values tensor))
+         (nnz (length values))
+         (counts (make-array nnz :element-type 'fixnum :initial-element 0))
+         (total 0))
     (loop for i from 0 below nnz
-          unless (= (aref mask i) 1)
-            collect i)))
+          do (let ((count (%count-value-as-integer (aref values i) i)))
+               (setf (aref counts i) count)
+               (incf total count)))
+    (when (<= total 0)
+      (error 'invalid-input-error
+             :reason :empty-tensor
+             :details "tensor has a total count of 0; nothing to cross-validate"))
+    (values counts total)))
 
-(defun %evaluate-fold
-       (shape train-indices train-counts valid-indices valid-counts rank
-        &key (n-cycle 100) convergence-threshold convergence-window
-        (evaluation-function #'sparse-kl-divergence) verbose)
-  "Evaluate a single fold of cross-validation.
+(defun %thin-counts (counts k random-state)
+  "Assign every event to one of K folds uniformly at random.
 
-Fits a decomposition model on training data and evaluates it on validation data.
+Returns an (nnz x K) fixnum array of validation counts. Row i is a Multinomial
+draw with parameters (COUNTS[i]; 1/K, ..., 1/K), obtained by walking the events
+of the cell one at a time - no event objects and no per-event storage.
 
-SHAPE is the tensor dimensions.
-TRAIN-INDICES, TRAIN-COUNTS are the training set sparse tensor.
-VALID-INDICES, VALID-COUNTS are the validation set sparse tensor.
-RANK is the number of latent factors to use.
-N-CYCLE, CONVERGENCE-THRESHOLD, CONVERGENCE-WINDOW control decomposition.
-EVALUATION-FUNCTION computes the validation score (default: sparse-kl-divergence).
-It is called as (funcall fn valid-indices valid-counts approx factor-matrices),
-matching the SPARSE-KL-DIVERGENCE lambda list; metrics that ignore the model
-structure can simply declare the fourth argument ignored.
-VERBOSE controls output during decomposition.
+Runs in O(total-count) time and O(nnz * K) space."
+  (declare (type (simple-array fixnum (*)) counts)
+           (type fixnum k))
+  (let* ((nnz (length counts))
+         (validation (make-array (list nnz k) :element-type 'fixnum
+                                              :initial-element 0)))
+    (loop for i from 0 below nnz
+          do (loop repeat (aref counts i)
+                   do (incf (aref validation i (random k random-state)))))
+    validation))
 
-Returns the evaluation score on the validation set."
-  (let ((train-tensor (make-sparse-tensor shape train-indices train-counts)))
-    (multiple-value-bind (factor-matrix-vector iterations)
-        (decomposition train-tensor :r rank :n-cycle n-cycle
-         :convergence-threshold convergence-threshold :convergence-window
-         convergence-window :verbose verbose)
-      (declare (ignore iterations))
-      (let ((approx
-             (make-array (length valid-counts) :element-type 'double-float
-                         :initial-element 0.0d0)))
-        (sdot factor-matrix-vector valid-indices approx)
-        (funcall evaluation-function valid-indices valid-counts approx
-                 factor-matrix-vector)))))
+(defun %fold-totals (validation-counts counts fold-index)
+  "Return the total training and validation counts of FOLD-INDEX."
+  (declare (type (simple-array fixnum (* *)) validation-counts)
+           (type (simple-array fixnum (*)) counts))
+  (let ((train 0)
+        (valid 0))
+    (loop for i from 0 below (length counts)
+          do (let ((v (aref validation-counts i fold-index)))
+               (incf valid v)
+               (incf train (- (aref counts i) v))))
+    (values train valid)))
 
-(defun cross-validate-rank (indices counts ranks &key (k 5)
-                                    (n-cycle 100)
-                                    convergence-threshold
-                                    convergence-window
-                                    (evaluation-function #'sparse-kl-divergence)
-                                    random-state
-                                    verbose)
-  "Perform K-fold cross-validation to evaluate multiple rank values.
+(defun make-poisson-folds (tensor k &key random-state)
+  "Split the counts of TENSOR into K cross-validation folds by Poisson thinning.
 
-INDICES is the sparse tensor index matrix (NNZ x N-MODES).
-COUNTS is the observation count vector.
-RANKS is a list of rank values to evaluate.
-K is the number of cross-validation folds (default 5).
-N-CYCLE, CONVERGENCE-THRESHOLD, CONVERGENCE-WINDOW control decomposition.
-EVALUATION-FUNCTION computes validation score (default: sparse-kl-divergence);
-it is called as (fn valid-indices valid-counts approx factor-matrices).
-RANDOM-STATE controls fold randomization for reproducibility.
-VERBOSE controls output during decomposition.
+Each event at each coordinate is assigned to one fold uniformly at random:
 
-Returns a list of result alists, one per rank, each containing:
-  :rank - the rank value tested
-  :mean - mean validation score across folds
-  :std  - standard deviation of validation scores
-  :scores - list of individual fold scores
+  (V_i^1, ..., V_i^K) | X_i ~ Multinomial(X_i; 1/K, ..., 1/K)
 
-Lower mean scores indicate better fit (for KL divergence).
-Progress is printed to *STANDARD-OUTPUT* during execution."
-  (let* ((nnz (array-dimension indices 0))
-         (shape (%build-shape indices))
-         (folds (if random-state
-                    (make-fold-splits indices counts k :random-state random-state)
-                    (make-fold-splits indices counts k)))
-         (total (* (length ranks) (length folds)))
-         (completed 0)
-         (results '()))
-    (dolist (rank ranks)
-      (let ((fold-scores '()))
-        (dolist (subset folds)
-          (multiple-value-bind (valid-indices valid-counts)
-              (%subset-tensor indices counts subset)
-            (multiple-value-bind (train-indices train-counts)
-                (%subset-tensor indices counts (%complement-subset nnz subset))
-              (push (%evaluate-fold shape
-                                     train-indices train-counts
-                                     valid-indices valid-counts rank
-                                     :n-cycle n-cycle
-                                     :convergence-threshold convergence-threshold
-                                     :convergence-window convergence-window
-                                     :evaluation-function evaluation-function
-                                     :verbose verbose)
-                    fold-scores)
-               (incf completed)
-               (let* ((ratio (/ completed (max 1 total)))
-                      (percent (* 100d0 (coerce ratio 'double-float))))
-                 (format t "Cross-validation progress ~D/~D (~,2F%%)~%"
-                         completed total percent)
-                 (finish-output)))))
-        (let* ((mean (/ (reduce #'+ fold-scores) (length fold-scores)))
-               (variance (if (> (length fold-scores) 1)
-                             (/ (reduce #'+ fold-scores
-                                        :key (lambda (score)
-                                               (expt (- score mean) 2)))
-                                (1- (length fold-scores)))
-                             0d0))
-               (std (sqrt variance)))
-          (push (list (cons :rank rank)
-                      (cons :mean mean)
-                      (cons :std std)
-                      (cons :scores (nreverse fold-scores)))
-                results))))
-    (nreverse results)))
+Fold f then uses T_i^f = X_i - V_i^f for training and V_i^f for validation, so
+the training exposure is (K-1)/K and the validation exposure is 1/K. Under
+Poisson thinning the two halves are independent Poisson samples, which is what
+makes this a valid split for a count model whose unstored coordinates are
+observed zeros.
 
-(defun select-rank (indices counts ranks &key (k 5)
-                             (n-cycle 100)
-                             convergence-threshold
-                             convergence-window
-                             (evaluation-function #'sparse-kl-divergence)
-                             random-state
-                             verbose)
-  "Select the best rank for tensor decomposition via cross-validation.
+TENSOR       - sparse-tensor with non-negative integer counts
+K            - number of folds; must be an integer >= 2 and <= the total count
+RANDOM-STATE - state used for the assignment; a copy is taken, so the caller's
+               state is never advanced. Defaults to *RANDOM-STATE*.
 
-This is a convenience wrapper around CROSS-VALIDATE-RANK that returns
-the rank with the lowest mean validation score.
+Returns a POISSON-FOLDS structure. Signals INVALID-INPUT-ERROR for a tensor
+that is not a valid count tensor, for K outside the allowed range, or when a
+fold ends up with no training or no validation events after several attempts."
+  (unless (sparse-tensor-p tensor)
+    (error 'invalid-input-error
+           :reason :invalid-tensor
+           :details (format nil "expected a sparse-tensor, got ~S" (type-of tensor))))
+  (unless (and (integerp k) (>= k 2))
+    (error 'invalid-input-error
+           :reason :invalid-fold-count
+           :details (format nil "k must be an integer >= 2, got ~S; a single fold leaves nothing to validate against"
+                            k)))
+  (multiple-value-bind (counts total) (%tensor-integer-counts tensor)
+    (when (> k total)
+      (error 'invalid-input-error
+             :reason :invalid-fold-count
+             :details (format nil "k=~D exceeds the total count ~D; there are not enough events to fill every fold"
+                              k total)))
+    (let ((state (make-random-state (or random-state *random-state*))))
+      (loop for attempt from 1 to 10
+            for validation = (%thin-counts counts k state)
+            when (loop for fold-index from 0 below k
+                       always (multiple-value-bind (train valid)
+                                  (%fold-totals validation counts fold-index)
+                                (and (plusp train) (plusp valid))))
+              do (return (%make-poisson-folds :tensor tensor :k k
+                                              :validation-counts validation))
+            finally
+               (error 'invalid-input-error
+                      :reason :degenerate-fold
+                      :details
+                      (format nil "after ~D attempts some fold still had no training or no validation events (total count ~D, k=~D); use a smaller k"
+                              attempt total k))))))
 
-INDICES is the sparse tensor index matrix (NNZ x N-MODES).
-COUNTS is the observation count vector.
-RANKS is a list of candidate rank values to evaluate.
-Other parameters are passed through to CROSS-VALIDATE-RANK.
+(defun poisson-folds-prediction-scale (folds)
+  "Return the exposure ratio p_valid / p_train = 1 / (K - 1) for FOLDS.
+
+A model fitted on a fold's training tensor predicts at the training exposure
+(K-1)/K, while the validation counts were drawn at exposure 1/K, so validation
+predictions must be multiplied by this ratio."
+  (/ 1.0d0 (coerce (1- (poisson-folds-k folds)) 'double-float)))
+
+(defun %fold-sub-tensor (tensor counts n-modes nnz)
+  "Build a sparse-tensor from COUNTS, dropping cells whose count is zero.
+
+The shape and domains of TENSOR are reused verbatim, so a mode value that
+happens not to appear in this fold does not shrink the tensor."
+  (declare (type (simple-array fixnum (*)) counts))
+  (let ((kept (loop for i from 0 below nnz
+                    count (plusp (aref counts i))))
+        (source (sparse-tensor-indices tensor)))
+    (let ((indices (make-array (list kept n-modes) :element-type 'fixnum))
+          (values (make-array kept :element-type 'double-float))
+          (row 0))
+      (loop for i from 0 below nnz
+            do (when (plusp (aref counts i))
+                 (loop for mode from 0 below n-modes
+                       do (setf (aref indices row mode) (aref source i mode)))
+                 (setf (aref values row) (coerce (aref counts i) 'double-float))
+                 (incf row)))
+      (make-sparse-tensor (sparse-tensor-shape tensor) indices values
+                          :domains (sparse-tensor-domains tensor)))))
+
+(defun poisson-fold-tensors (folds fold-index)
+  "Materialize the training and validation tensors of FOLD-INDEX.
+
+Returns four values: the training sparse-tensor, the validation sparse-tensor,
+the total training count and the total validation count. Cells with a count of
+zero are omitted from the sparse representation; no dense array is built."
+  (let* ((tensor (poisson-folds-tensor folds))
+         (validation-counts (poisson-folds-validation-counts folds))
+         (source-values (sparse-tensor-values tensor))
+         (nnz (length source-values))
+         (n-modes (array-dimension (sparse-tensor-indices tensor) 1))
+         (train-counts (make-array nnz :element-type 'fixnum :initial-element 0))
+         (valid-counts (make-array nnz :element-type 'fixnum :initial-element 0))
+         (train-total 0)
+         (valid-total 0))
+    (loop for i from 0 below nnz
+          do (let* ((original (truncate (fround (aref source-values i))))
+                    (v (aref validation-counts i fold-index)))
+               (setf (aref valid-counts i) v)
+               (setf (aref train-counts i) (- original v))
+               (incf valid-total v)
+               (incf train-total (- original v))))
+    (values (%fold-sub-tensor tensor train-counts n-modes nnz)
+            (%fold-sub-tensor tensor valid-counts n-modes nnz)
+            train-total
+            valid-total)))
+
+;;; ============================================================
+;;; Fold scoring
+;;; ============================================================
+
+(defun normalized-generalized-kl (validation-tensor approximation
+                                  factor-matrix-vector prediction-scale
+                                  validation-count)
+  "Default cross-validation fold score: generalized KL per validation event.
+
+  score = D(V || s * T^) / sum_i V_i
+
+D is the generalized KL of SPARSE-KL-DIVERGENCE, so it includes the model's
+predicted mass on the implicit-zero coordinates, and s is PREDICTION-SCALE.
+Dividing by the fold's total validation count makes folds of different sizes
+comparable; lower is better.
+
+This is *not* the Poisson deviance: the deviance is twice this quantity.
+
+VALIDATION-TENSOR    - the fold's validation sparse-tensor
+APPROXIMATION        - reconstruction at the validation coordinates, from SDOT
+FACTOR-MATRIX-VECTOR - factors fitted on the fold's training tensor
+PREDICTION-SCALE     - exposure ratio applied to every prediction
+VALIDATION-COUNT     - total validation count of the fold"
+  (/ (sparse-kl-divergence (sparse-tensor-indices validation-tensor)
+                           (sparse-tensor-values validation-tensor)
+                           approximation
+                           factor-matrix-vector
+                           :prediction-scale prediction-scale)
+     (coerce validation-count 'double-float)))
+
+(defun %evaluate-fold (train-tensor validation-tensor rank prediction-scale
+                       validation-count init-random-state
+                       &key (n-cycle 100) convergence-threshold convergence-window
+                            (evaluation-function (function normalized-generalized-kl))
+                            verbose)
+  "Fit RANK factors on TRAIN-TENSOR and score them on VALIDATION-TENSOR.
+
+INIT-RANDOM-STATE seeds the factor initialization; it is copied, so the same
+fold produces the same starting point for every candidate rank."
+  (let ((factor-matrix-vector
+          (let ((*random-state* (make-random-state init-random-state)))
+            (decomposition train-tensor :r rank :n-cycle n-cycle
+                                        :convergence-threshold convergence-threshold
+                                        :convergence-window convergence-window
+                                        :verbose verbose))))
+    (let ((approximation
+            (make-array (length (sparse-tensor-values validation-tensor))
+                        :element-type 'double-float :initial-element 0.0d0)))
+      (sdot factor-matrix-vector (sparse-tensor-indices validation-tensor)
+            approximation)
+      (funcall evaluation-function validation-tensor approximation
+               factor-matrix-vector prediction-scale validation-count))))
+
+;;; ============================================================
+;;; Cross-validation
+;;; ============================================================
+
+(defun %validate-ranks (ranks)
+  "Signal INVALID-INPUT-ERROR unless RANKS is a non-empty list of positive integers."
+  (unless (and (listp ranks) ranks)
+    (error 'invalid-input-error
+           :reason :empty-ranks
+           :details "ranks must be a non-empty list of candidate ranks"))
+  (dolist (rank ranks)
+    (unless (and (integerp rank) (plusp rank))
+      (error 'invalid-input-error
+             :reason :invalid-rank
+             :details (format nil "rank ~S is not a positive integer" rank)))))
+
+(defun %spawn-init-states (k random-state)
+  "Draw K independent random states from RANDOM-STATE, one per fold.
+
+Generating them up front keeps a fold's initialization identical across
+candidate ranks, so reordering RANKS cannot change any rank's scores."
+  (loop repeat k
+        collect (%seed-random-state (random (expt 2 31) random-state))))
+
+(defun %summarize-scores (rank scores validation-counts k)
+  "Build the result alist for RANK from its per-fold SCORES."
+  (let* ((n (length scores))
+         (mean (/ (reduce (function +) scores) (coerce n 'double-float)))
+         (variance (if (> n 1)
+                       (/ (reduce (function +) scores
+                                  :key (lambda (score) (expt (- score mean) 2)))
+                          (coerce (1- n) 'double-float))
+                       0d0))
+         (std (sqrt variance)))
+    (list (cons :rank rank)
+          (cons :mean mean)
+          (cons :std std)
+          (cons :standard-error (/ std (sqrt (coerce k 'double-float))))
+          (cons :scores scores)
+          (cons :validation-counts validation-counts))))
+
+(defun cross-validate-rank (tensor ranks
+                            &key (k 5) (n-cycle 100)
+                                 convergence-threshold convergence-window
+                                 (evaluation-function
+                                  (function normalized-generalized-kl))
+                                 random-state verbose)
+  "Score each candidate rank by K-fold cross-validation over Poisson-thinned counts.
+
+TENSOR       - sparse-tensor with non-negative integer counts
+RANKS        - non-empty list of positive candidate ranks
+K            - number of folds (default 5); integer >= 2, at most the total count
+N-CYCLE, CONVERGENCE-THRESHOLD, CONVERGENCE-WINDOW control each fit
+EVALUATION-FUNCTION - fold score; defaults to NORMALIZED-GENERALIZED-KL and is
+               called as
+
+                 (funcall fn validation-tensor approximation
+                             factor-matrix-vector prediction-scale
+                             validation-count)
+
+               where APPROXIMATION holds the training-exposure reconstruction at
+               the validation coordinates and PREDICTION-SCALE is the exposure
+               ratio the metric must apply to it.
+RANDOM-STATE - controls both the thinning and the per-fold factor
+               initialization; it is copied, so the caller's state is never
+               advanced. Defaults to *RANDOM-STATE*.
+VERBOSE      - when true, report progress on *STANDARD-OUTPUT*; nothing is
+               printed otherwise.
+
+The folds are drawn once and shared by every candidate rank, and each fold's
+initialization state is fixed in advance, so a rank's scores do not depend on
+the order of RANKS.
+
+Returns a list of result alists in the order of RANKS, each containing:
+  :rank              - the candidate rank
+  :mean              - mean fold score (lower is better)
+  :std               - sample standard deviation of the fold scores
+  :standard-error    - :std divided by sqrt(K)
+  :scores            - the per-fold scores
+  :validation-counts - the per-fold total validation counts
+
+Signals INVALID-INPUT-ERROR for invalid ranks, an invalid K, or a tensor whose
+counts are not usable non-negative integers."
+  (%validate-ranks ranks)
+  (let* ((state (make-random-state (or random-state *random-state*)))
+         (folds (make-poisson-folds tensor k :random-state state))
+         (prediction-scale (poisson-folds-prediction-scale folds))
+         (init-states (%spawn-init-states k state))
+         (fold-data (loop for fold-index from 0 below k
+                          collect (multiple-value-list
+                                   (poisson-fold-tensors folds fold-index))))
+         (total (* (length ranks) k))
+         (completed 0))
+    (loop for rank in ranks
+          collect (let ((scores '())
+                        (counts '()))
+                    (loop for datum in fold-data
+                          for init-state in init-states
+                          for fold-index from 0
+                          do (destructuring-bind (train valid train-total valid-total)
+                                 datum
+                               (declare (ignore train-total))
+                               (let ((score (%evaluate-fold
+                                             train valid rank prediction-scale
+                                             valid-total init-state
+                                             :n-cycle n-cycle
+                                             :convergence-threshold convergence-threshold
+                                             :convergence-window convergence-window
+                                             :evaluation-function evaluation-function
+                                             :verbose verbose)))
+                                 (push score scores)
+                                 (push valid-total counts)
+                                 (incf completed)
+                                 (when verbose
+                                   (format t "rank ~D fold ~D/~D: score ~,6F (~D/~D done)~%"
+                                           rank (1+ fold-index) k score completed total)
+                                   (finish-output)))))
+                    (%summarize-scores rank (nreverse scores) (nreverse counts) k)))))
+
+;;; ============================================================
+;;; Rank selection
+;;; ============================================================
+
+(defun %best-result (cv-results)
+  "Return the result with the lowest :MEAN, breaking ties toward the smaller rank.
+
+Does not modify CV-RESULTS."
+  (reduce (lambda (best candidate)
+            (let ((best-mean (cdr (assoc :mean best)))
+                  (candidate-mean (cdr (assoc :mean candidate))))
+              (cond ((< candidate-mean best-mean) candidate)
+                    ((> candidate-mean best-mean) best)
+                    ((< (cdr (assoc :rank candidate)) (cdr (assoc :rank best)))
+                     candidate)
+                    (t best))))
+          cv-results))
+
+(defun select-rank (tensor ranks
+                    &key (k 5) (n-cycle 100)
+                         convergence-threshold convergence-window
+                         (evaluation-function (function normalized-generalized-kl))
+                         random-state verbose)
+  "Select the rank with the lowest mean cross-validation score.
+
+Arguments are passed through to CROSS-VALIDATE-RANK. Ties are broken toward the
+smaller rank, and the returned result list is the one CROSS-VALIDATE-RANK
+produced: same length, same order as RANKS, never sorted in place.
 
 Returns two values:
-  1. The result alist for the best rank (lowest mean validation score)
-  2. The complete list of all cross-validation results
+  1. The result alist for the selected rank
+  2. The complete list of cross-validation results
 
 Example:
-  (select-rank indices counts '(2 3 4 5) :k 5 :n-cycle 50)
-  => ((:rank . 3) (:mean . 0.123) (:std . 0.015) (:scores . (...)))
-     (((:rank . 2) ...) ((:rank . 3) ...) ...)"
-  (let* ((cv-key-args (list :k k
-                            :n-cycle n-cycle
-                            :convergence-threshold convergence-threshold
-                            :convergence-window convergence-window
-                            :evaluation-function evaluation-function
-                            :verbose verbose))
-         (cv-key-args (if random-state
-                          (append cv-key-args (list :random-state random-state))
-                          cv-key-args))
-         (cv-results (apply #'cross-validate-rank
-                            indices counts ranks cv-key-args)))
-    (values (car (sort cv-results #'<
-                       :key (lambda (result)
-                              (cdr (assoc :mean result)))))
-            cv-results)))
+  (select-rank tensor '(2 4 8) :k 5 :n-cycle 50)"
+  (let ((cv-results (cross-validate-rank tensor ranks
+                                         :k k
+                                         :n-cycle n-cycle
+                                         :convergence-threshold convergence-threshold
+                                         :convergence-window convergence-window
+                                         :evaluation-function evaluation-function
+                                         :random-state random-state
+                                         :verbose verbose)))
+    (values (%best-result cv-results) cv-results)))
 
-(defun select-rank-1se
-       (indices counts ranks
-        &key (k 5) (n-cycle 100) convergence-threshold convergence-window
-        (evaluation-function #'sparse-kl-divergence) random-state verbose)
-  "Select rank using the 1-SE rule for tensor decomposition.
+(defun select-rank-1se (tensor ranks
+                        &key (k 5) (n-cycle 100)
+                             convergence-threshold convergence-window
+                             (evaluation-function
+                              (function normalized-generalized-kl))
+                             random-state verbose)
+  "Select the smallest rank within one standard error of the best mean score.
 
-The 1-SE (one standard error) rule selects the simplest model (smallest rank)
-whose validation score is within one standard error of the best model's mean.
-This approach favors parsimony and helps prevent overfitting.
+The threshold uses the standard error of the mean, std / sqrt(K), as is standard
+in the cross-validation literature - not the raw standard deviation. Favouring
+the simplest model inside that band guards against reading noise as signal.
 
-Note: The threshold uses the standard error of the mean (std / sqrt(k)),
-not the standard deviation, as is standard in cross-validation literature.
-
-INDICES is the sparse tensor index matrix (NNZ x N-MODES).
-COUNTS is the observation count vector.
-RANKS is a list of candidate rank values to evaluate.
-K is the number of cross-validation folds (default 5).
-Other parameters are passed through to CROSS-VALIDATE-RANK.
+Arguments are passed through to CROSS-VALIDATE-RANK. The returned result list is
+never sorted in place.
 
 Returns two values:
-  1. The result alist for the selected rank (simplest within 1-SE of best)
-  2. The complete list of all cross-validation results
+  1. The result alist for the selected rank
+  2. The complete list of cross-validation results"
+  (let* ((cv-results (cross-validate-rank tensor ranks
+                                          :k k
+                                          :n-cycle n-cycle
+                                          :convergence-threshold convergence-threshold
+                                          :convergence-window convergence-window
+                                          :evaluation-function evaluation-function
+                                          :random-state random-state
+                                          :verbose verbose))
+         (best (%best-result cv-results))
+         (threshold (+ (cdr (assoc :mean best))
+                       (cdr (assoc :standard-error best))))
+         (selected (reduce (lambda (chosen candidate)
+                             (if (and (<= (cdr (assoc :mean candidate)) threshold)
+                                      (or (null chosen)
+                                          (< (cdr (assoc :rank candidate))
+                                             (cdr (assoc :rank chosen)))))
+                                 candidate
+                                 chosen))
+                           cv-results
+                           :initial-value nil)))
+    (values (or selected best) cv-results)))
 
-Example:
-  (select-rank-1se indices counts '(2 3 4 5 6 7 8) :k 5 :n-cycle 50)
-  ;; If rank=5 has best mean=0.10 with std=0.02, SE=0.02/sqrt(5)=0.009
-  ;; threshold = 0.10 + 0.009 = 0.109
-  ;; Selects smallest rank with mean <= 0.109
-  => ((:rank . 4) (:mean . 0.108) (:std . 0.015) (:scores . (...)))
-     (((:rank . 2) ...) ((:rank . 3) ...) ...)"
-  (let* ((cv-key-args
-          (list :k k :n-cycle n-cycle :convergence-threshold
-                convergence-threshold :convergence-window convergence-window
-                :evaluation-function evaluation-function :verbose verbose))
-         (cv-key-args
-          (if random-state
-              (append cv-key-args (list :random-state random-state))
-              cv-key-args))
-         (cv-results
-          (apply #'cross-validate-rank indices counts ranks cv-key-args))
-         (sqrt-k (sqrt (coerce k 'double-float))))
-    ;; Find the best result (lowest mean)
-    (let* ((best (car (sort (copy-list cv-results) #'<
-                            :key (lambda (r) (cdr (assoc :mean r))))))
-           (best-mean (cdr (assoc :mean best)))
-           (best-std (cdr (assoc :std best)))
-           ;; Use standard error of the mean: std / sqrt(k)
-           (best-se (/ best-std sqrt-k))
-           (threshold (+ best-mean best-se))
-           ;; Filter results within 1-SE threshold
-           (within-threshold
-            (remove-if (lambda (r) (> (cdr (assoc :mean r)) threshold))
-                       cv-results))
-           ;; Select smallest rank among those within threshold
-           (selected (car (sort within-threshold #'<
-                                :key (lambda (r) (cdr (assoc :rank r)))))))
-      (values selected cv-results))))
+(defun poisson-folds-count (folds)
+  "Return the number of folds in FOLDS. Alias for POISSON-FOLDS-K."
+  (poisson-folds-k folds))
