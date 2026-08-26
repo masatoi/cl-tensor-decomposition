@@ -181,9 +181,13 @@ score_f = D(V^f || s * T^^f) / sum_i V_i^f
 Lower is better. This is not the Poisson deviance — the deviance is twice this.
 
 This requires **non-negative integer counts**; fractional values are rejected
-rather than truncated. `k` must be at least 2 and at most the total count, but it
-is *not* bounded by the number of stored non-zeros: a single cell holding 100
-events splits into 5 folds perfectly well.
+rather than truncated. `k` must be at least 2, and the tensor must hold enough
+events that a uniform assignment reliably fills every fold — by the union bound
+`P(some fold empty) <= k*(1-1/k)^N`, so the minimum is `ln(2k)/ln(k/(k-1))`
+events (2 for `k=2`, 11 for `k=5`, 29 for `k=10`). Below that the draw would
+usually leave a fold empty, so the input is rejected up front instead of failing
+on most seeds. The bound is on the **event count**, not on the number of stored
+non-zeros: a single cell holding 100 events splits into 5 folds perfectly well.
 
 `make-poisson-folds` exposes the split directly if you need it:
 

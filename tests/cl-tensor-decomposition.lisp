@@ -270,7 +270,7 @@ during cross-validation; EPSILON is added after scaling, never scaled itself."
                (make-array 1 :element-type 'double-float :initial-contents '(3d0)))))
     (ok (handler-case (progn (cltd:cross-validate-rank tiny '(1) :k 5 :n-cycle 5) nil)
           (cltd:invalid-input-error () t))
-        "k greater than the total count is rejected")))
+        "Too few events for the requested k is rejected")))
 
 (deftest cross-validate-rank-scores-are-finite
   "Every fold score is a finite double-float."
@@ -2714,7 +2714,7 @@ The 1-SE rule favors simpler models, so when the best rank has high variance,
                (make-array 1 :element-type 'double-float :initial-contents '(3d0)))))
     (ok (handler-case (progn (cltd:make-poisson-folds tiny 5) nil)
           (cltd:invalid-input-error () t))
-        "k greater than the total count is rejected")))
+        "Too few events for the requested k is rejected")))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Exposure correction and fold scoring
@@ -2802,3 +2802,47 @@ both the stored-entry predictions and the predicted mass on the implicit zeros."
           (format nil "Fold score exceeds the stored-only value ~,6F by the ~
                        scaled mass of the three implicit zeros (3.0)"
                   stored-only)))))
+
+(defun %single-cell-tensor (count)
+  "A 2x2 tensor whose only stored cell carries COUNT events (test-only)."
+  (cltd:make-sparse-tensor
+   '(2 2)
+   (make-array '(1 2) :element-type 'fixnum :initial-contents '((0 0)))
+   (make-array 1 :element-type 'double-float
+               :initial-contents (list (coerce count 'double-float)))))
+
+(deftest poisson-folds-accept-only-reliably-fillable-k
+  "The accepted range matches what can actually be sampled.
+
+A uniform assignment leaves a fold empty with probability at most k*(1-1/k)^N,
+so counts near k almost never fill every fold. Such input is rejected up front
+rather than accepted and then failed on most seeds."
+  (let ((k 10))
+    (ok (> (cltd::%minimum-total-count k) k)
+        (format nil "k=~D needs more than ~D events (~D)" k k
+                (cltd::%minimum-total-count k)))
+    (ok (handler-case
+            (progn (cltd:make-poisson-folds (%single-cell-tensor k) k
+                                            :random-state (cltd:%seed-random-state 1))
+                   nil)
+          (cltd:invalid-input-error () t))
+        "total = k is rejected up front, not by an unlucky draw")
+    (let ((tensor (%single-cell-tensor (cltd::%minimum-total-count k))))
+      (ok (loop for seed from 1 to 200
+                always (handler-case
+                           (progn (cltd:make-poisson-folds
+                                   tensor k :random-state (cltd:%seed-random-state seed))
+                                  t)
+                         (cltd:invalid-input-error () nil)))
+          (format nil "k=~D at the accepted minimum (~D events) succeeds for 200 seeds"
+                  k (cltd::%minimum-total-count k)))))
+  (dolist (k '(2 3 5 20))
+    (let ((tensor (%single-cell-tensor (cltd::%minimum-total-count k))))
+      (ok (loop for seed from 1 to 100
+                always (handler-case
+                           (progn (cltd:make-poisson-folds
+                                   tensor k :random-state (cltd:%seed-random-state seed))
+                                  t)
+                         (cltd:invalid-input-error () nil)))
+          (format nil "k=~D at its minimum (~D events) succeeds for 100 seeds"
+                  k (cltd::%minimum-total-count k))))))

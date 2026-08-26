@@ -100,6 +100,23 @@ Runs in O(total-count) time and O(nnz * K) space."
                (incf train (- (aref counts i) v))))
     (values train valid)))
 
+(defun %minimum-total-count (k)
+  "Smallest event count for which a uniform assignment reliably fills every fold.
+
+A fold is left empty with probability (1 - 1/K)^N, so by the union bound
+
+  P(some fold empty) <= K * (1 - 1/K)^N
+
+Requiring that to be at most 1/2 gives N >= ln(2K) / ln(K / (K-1)). Below this
+threshold a draw would usually leave a fold empty: K=10 with exactly 10 events
+fills every fold only about 0.036% of the time. Accepting such input and then
+failing to sample it would be misleading, so it is rejected up front instead.
+
+The result is always at least K, so it subsumes the hard feasibility bound."
+  (max k
+       (ceiling (/ (log (* 2.0d0 k))
+                   (log (/ (coerce k 'double-float) (1- k)))))))
+
 (defun make-poisson-folds (tensor k &key random-state)
   "Split the counts of TENSOR into K cross-validation folds by Poisson thinning.
 
@@ -114,13 +131,15 @@ makes this a valid split for a count model whose unstored coordinates are
 observed zeros.
 
 TENSOR       - sparse-tensor with non-negative integer counts
-K            - number of folds; must be an integer >= 2 and <= the total count
+K            - number of folds; an integer >= 2. The tensor must also hold at
+               least (%MINIMUM-TOTAL-COUNT K) events, the point below which a
+               uniform assignment would usually leave some fold empty.
 RANDOM-STATE - state used for the assignment; a copy is taken, so the caller's
                state is never advanced. Defaults to *RANDOM-STATE*.
 
 Returns a POISSON-FOLDS structure. Signals INVALID-INPUT-ERROR for a tensor
-that is not a valid count tensor, for K outside the allowed range, or when a
-fold ends up with no training or no validation events after several attempts."
+that is not a valid count tensor, for K below 2, or for a tensor holding too
+few events to fill K folds reliably."
   (unless (sparse-tensor-p tensor)
     (error 'invalid-input-error
            :reason :invalid-tensor
@@ -131,13 +150,16 @@ fold ends up with no training or no validation events after several attempts."
            :details (format nil "k must be an integer >= 2, got ~S; a single fold leaves nothing to validate against"
                             k)))
   (multiple-value-bind (counts total) (%tensor-integer-counts tensor)
-    (when (> k total)
-      (error 'invalid-input-error
-             :reason :invalid-fold-count
-             :details (format nil "k=~D exceeds the total count ~D; there are not enough events to fill every fold"
-                              k total)))
+    (let ((minimum (%minimum-total-count k)))
+      (when (< total minimum)
+        (error 'invalid-input-error
+               :reason :insufficient-counts
+               :details (format nil "k=~D needs at least ~D events to fill every fold reliably, but the tensor holds ~D; use a smaller k"
+                                k minimum total))))
     (let ((state (make-random-state (or random-state *random-state*))))
-      (loop for attempt from 1 to 10
+      ;; Past the threshold above, a single draw fills every fold at least half
+      ;; the time, so 32 consecutive failures has probability below 2^-32.
+      (loop for attempt from 1 to 32
             for validation = (%thin-counts counts k state)
             when (loop for fold-index from 0 below k
                        always (multiple-value-bind (train valid)

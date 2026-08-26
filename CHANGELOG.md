@@ -33,9 +33,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   silently drop categories that happened not to appear in a fold.
 
   Requires non-negative **integer** counts; fractional values now signal
-  `invalid-input-error` rather than being truncated. `k` must be an integer >= 2
-  and at most the total count — but it is no longer bounded by the number of
-  stored non-zeros, since a single cell holding many events can fill many folds.
+  `invalid-input-error` rather than being truncated. `k` must be an integer >= 2,
+  and the tensor must hold at least `ln(2k)/ln(k/(k-1))` events — the point below
+  which a uniform assignment would usually leave a fold empty. The bound is on
+  the event count, not on the number of stored non-zeros, so a single cell
+  holding many events can fill many folds.
 
 - **`:evaluation-function` protocol changed**: fold metrics are now called as
   `(fn validation-tensor approximation factor-matrix-vector prediction-scale
@@ -106,8 +108,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   is materialized.
 
   Custom `:evaluation-function` arguments to `cross-validate-rank`,
-  `select-rank` and `select-rank-1se` are now called with four arguments
-  `(indices counts approx factor-matrices)` to match.
+  `select-rank` and `select-rank-1se` changed to match. They were superseded
+  again by the cross-validation rework above, which is the protocol they use
+  now; write new metrics against that one.
 
 - **`decomposition` now accepts only `sparse-tensor`**: The legacy API
   `(decomposition shape indices values ...)` has been removed. You must now
