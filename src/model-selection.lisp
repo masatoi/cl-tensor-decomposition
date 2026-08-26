@@ -100,21 +100,38 @@ Runs in O(total-count) time and O(nnz * K) space."
                (incf train (- (aref counts i) v))))
     (values train valid)))
 
+(defparameter *fold-emptiness-tolerance* 1.0d-6
+  "Largest probability of an empty fold that MAKE-POISSON-FOLDS will accept.
+
+The retry in MAKE-POISSON-FOLDS keeps only assignments in which every fold has
+both training and validation events, which conditions the multinomial draw. That
+conditioning is harmless exactly when it almost never happens, so the accepted
+range is bounded by this tolerance: at the minimum count the retry fires for
+about one draw in a million, and the fold sizes keep the spread the unconditioned
+multinomial has. Loosening it trades that guarantee for accepting smaller
+tensors.")
+
 (defun %minimum-total-count (k)
-  "Smallest event count for which a uniform assignment reliably fills every fold.
+  "Smallest event count for which an empty fold is negligible.
 
 A fold is left empty with probability (1 - 1/K)^N, so by the union bound
 
   P(some fold empty) <= K * (1 - 1/K)^N
 
-Requiring that to be at most 1/2 gives N >= ln(2K) / ln(K / (K-1)). Below this
-threshold a draw would usually leave a fold empty: K=10 with exactly 10 events
-fills every fold only about 0.036% of the time. Accepting such input and then
-failing to sample it would be misleading, so it is rejected up front instead.
+The accepted range is where that is at most *FOLD-EMPTINESS-TOLERANCE*, giving
+
+  N >= ln(K / tolerance) / ln(K / (K-1))
+
+The bound is deliberately far above the point where a draw merely succeeds more
+often than not. At that weaker point roughly 40% of draws leave a fold empty, so
+the retry would discard 40% of the probability mass and reshape the distribution
+the folds are supposed to follow - with K=2 and 2 events it can return only the
+balanced 1/1 split, erasing the count variability the fold scores and standard
+errors are meant to measure.
 
 The result is always at least K, so it subsumes the hard feasibility bound."
   (max k
-       (ceiling (/ (log (* 2.0d0 k))
+       (ceiling (/ (log (/ (coerce k 'double-float) *fold-emptiness-tolerance*))
                    (log (/ (coerce k 'double-float) (1- k)))))))
 
 (defun make-poisson-folds (tensor k &key random-state)
@@ -132,14 +149,15 @@ observed zeros.
 
 TENSOR       - sparse-tensor with non-negative integer counts
 K            - number of folds; an integer >= 2. The tensor must also hold at
-               least (%MINIMUM-TOTAL-COUNT K) events, the point below which a
-               uniform assignment would usually leave some fold empty.
+               least (%MINIMUM-TOTAL-COUNT K) events, the point below which an
+               empty fold stops being negligible and the non-emptiness retry
+               would start reshaping the draw.
 RANDOM-STATE - state used for the assignment; a copy is taken, so the caller's
                state is never advanced. Defaults to *RANDOM-STATE*.
 
 Returns a POISSON-FOLDS structure. Signals INVALID-INPUT-ERROR for a tensor
-that is not a valid count tensor, for K below 2, or for a tensor holding too
-few events to fill K folds reliably."
+that is not a valid count tensor, for K below 2, or for a tensor holding too few
+events for K folds."
   (unless (sparse-tensor-p tensor)
     (error 'invalid-input-error
            :reason :invalid-tensor
@@ -154,11 +172,14 @@ few events to fill K folds reliably."
       (when (< total minimum)
         (error 'invalid-input-error
                :reason :insufficient-counts
-               :details (format nil "k=~D needs at least ~D events to fill every fold reliably, but the tensor holds ~D; use a smaller k"
+               :details (format nil "k=~D needs at least ~D events before an empty fold becomes negligible, but the tensor holds ~D; use a smaller k"
                                 k minimum total))))
     (let ((state (make-random-state (or random-state *random-state*))))
-      ;; Past the threshold above, a single draw fills every fold at least half
-      ;; the time, so 32 consecutive failures has probability below 2^-32.
+      ;; Past the threshold above, a draw leaves a fold empty with probability at
+      ;; most *fold-emptiness-tolerance*, so this loop is a safety net rather
+      ;; than part of the sampler: it essentially never runs a second attempt,
+      ;; which is what keeps the returned folds multinomial rather than
+      ;; multinomial conditioned on non-emptiness.
       (loop for attempt from 1 to 32
             for validation = (%thin-counts counts k state)
             when (loop for fold-index from 0 below k

@@ -181,13 +181,32 @@ score_f = D(V^f || s * T^^f) / sum_i V_i^f
 Lower is better. This is not the Poisson deviance — the deviance is twice this.
 
 This requires **non-negative integer counts**; fractional values are rejected
-rather than truncated. `k` must be at least 2, and the tensor must hold enough
-events that a uniform assignment reliably fills every fold — by the union bound
-`P(some fold empty) <= k*(1-1/k)^N`, so the minimum is `ln(2k)/ln(k/(k-1))`
-events (2 for `k=2`, 11 for `k=5`, 29 for `k=10`). Below that the draw would
-usually leave a fold empty, so the input is rejected up front instead of failing
-on most seeds. The bound is on the **event count**, not on the number of stored
-non-zeros: a single cell holding 100 events splits into 5 folds perfectly well.
+rather than truncated.
+
+`k` must be at least 2, and the tensor must hold enough events that an empty fold
+is negligible. A fold is empty with probability `(1-1/k)^N`, so by the union
+bound `P(some fold empty) <= k*(1-1/k)^N`; the accepted range is where that stays
+under `1e-6`:
+
+```
+N >= ln(k / 1e-6) / ln(k / (k-1))
+```
+
+| `k` | 2 | 3 | 5 | 10 | 20 | 50 |
+|---|---|---|---|---|---|---|
+| minimum events | 21 | 37 | 70 | 153 | 328 | 878 |
+
+The bound matters because a fold with no validation events has no score and a
+fold with no training events has no model, so `make-poisson-folds` redraws until
+every fold has both. Redrawing *conditions* the multinomial, so it is only
+harmless where it essentially never happens — hence a tolerance rather than a
+mere feasibility check. (At the weaker "succeeds more often than not" bound about
+40% of draws would be discarded, and `k=2` with 2 events could return only the
+balanced 1/1 split, erasing the count variability the scores and standard errors
+exist to measure.) Smaller tensors are rejected up front with the shortfall named.
+
+The bound is on the **event count**, not on the number of stored non-zeros: a
+single cell holding 100 events splits into 5 folds perfectly well.
 
 `make-poisson-folds` exposes the split directly if you need it:
 

@@ -2595,6 +2595,14 @@ The 1-SE rule favors simpler models, so when the best rank has high variance,
    (make-array 5 :element-type 'double-float
                :initial-contents '(17d0 4d0 23d0 9d0 31d0))))
 
+(defun %single-cell-tensor (count)
+  "A 2x2 tensor whose only stored cell carries COUNT events (test-only)."
+  (cltd:make-sparse-tensor
+   '(2 2)
+   (make-array '(1 2) :element-type 'fixnum :initial-contents '((0 0)))
+   (make-array 1 :element-type 'double-float
+               :initial-contents (list (coerce count 'double-float)))))
+
 (deftest poisson-folds-conserve-counts
   "For every fold: train + validation = original, cell by cell."
   (let* ((tensor (%make-count-tensor))
@@ -2723,8 +2731,9 @@ The 1-SE rule favors simpler models, so when the best rank has high variance,
 (deftest poisson-folds-prediction-scale-is-exposure-ratio
   "Training exposure is (k-1)/k and validation exposure 1/k, so the ratio is 1/(k-1)."
   (dolist (k '(2 3 5 10))
-    (let ((folds (cltd:make-poisson-folds CV-tensor k
-                                          :random-state (cltd:%seed-random-state 1))))
+    (let ((folds (cltd:make-poisson-folds
+                  (%single-cell-tensor (cltd::%minimum-total-count k)) k
+                  :random-state (cltd:%seed-random-state 1))))
       (ok (< (abs (- (cltd:poisson-folds-prediction-scale folds)
                      (/ 1d0 (coerce (1- k) 'double-float))))
              1d-12)
@@ -2803,14 +2812,6 @@ both the stored-entry predictions and the predicted mass on the implicit zeros."
                        scaled mass of the three implicit zeros (3.0)"
                   stored-only)))))
 
-(defun %single-cell-tensor (count)
-  "A 2x2 tensor whose only stored cell carries COUNT events (test-only)."
-  (cltd:make-sparse-tensor
-   '(2 2)
-   (make-array '(1 2) :element-type 'fixnum :initial-contents '((0 0)))
-   (make-array 1 :element-type 'double-float
-               :initial-contents (list (coerce count 'double-float)))))
-
 (deftest poisson-folds-accept-only-reliably-fillable-k
   "The accepted range matches what can actually be sampled.
 
@@ -2846,3 +2847,51 @@ rather than accepted and then failed on most seeds."
                          (cltd:invalid-input-error () nil)))
           (format nil "k=~D at its minimum (~D events) succeeds for 100 seeds"
                   k (cltd::%minimum-total-count k))))))
+
+
+(deftest poisson-folds-do-not-condition-away-count-variability
+  "The retry loop must not reshape the advertised multinomial draw.
+
+Retrying until every fold is nonempty conditions the distribution. The accepted
+range is therefore set where an empty fold has probability at most 1e-6, so the
+retry is a safety net rather than a sampler: a first draw is accepted essentially
+always, and fold sizes keep the spread a multinomial draw has."
+  (dolist (k '(2 3 5 10))
+    (let* ((minimum (cltd::%minimum-total-count k))
+           (counts (make-array 1 :element-type 'fixnum :initial-contents (list minimum)))
+           (rejected 0))
+      (loop for seed from 1 to 500
+            do (let ((validation (cltd::%thin-counts counts k (cltd:%seed-random-state seed))))
+                 (unless (loop for fold-index from 0 below k
+                               always (multiple-value-bind (train valid)
+                                          (cltd::%fold-totals validation counts fold-index)
+                                        (and (plusp train) (plusp valid))))
+                   (incf rejected))))
+      (ok (zerop rejected)
+          (format nil "k=~D at its minimum (~D events): ~D/500 first draws rejected"
+                  k minimum rejected))))
+  (let* ((k 2)
+         (minimum (cltd::%minimum-total-count k))
+         (tensor (%single-cell-tensor minimum))
+         (sizes (make-hash-table)))
+    (loop for seed from 1 to 100
+          do (let ((folds (cltd:make-poisson-folds
+                           tensor k :random-state (cltd:%seed-random-state seed))))
+               (incf (gethash (aref (cltd::poisson-folds-validation-counts folds) 0 0)
+                              sizes 0))))
+    (ok (> (hash-table-count sizes) 4)
+        (format nil "k=2 with ~D events yields ~D distinct fold sizes over 100 seeds"
+                minimum (hash-table-count sizes)))
+    (let ((low most-positive-fixnum)
+          (high 0))
+      (maphash (lambda (size count)
+                 (declare (ignore count))
+                 (setf low (min low size))
+                 (setf high (max high size)))
+               sizes)
+      (ok (>= (- high low) 3)
+          (format nil "Fold sizes span ~D..~D rather than collapsing onto a balanced split"
+                  low high))))
+  (ok (handler-case (progn (cltd:make-poisson-folds (%single-cell-tensor 2) 2) nil)
+        (cltd:invalid-input-error () t))
+      "k=2 with only 2 events is rejected: conditioning could return only the 1/1 split"))

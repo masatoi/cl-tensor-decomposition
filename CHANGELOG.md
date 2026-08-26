@@ -34,10 +34,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
   Requires non-negative **integer** counts; fractional values now signal
   `invalid-input-error` rather than being truncated. `k` must be an integer >= 2,
-  and the tensor must hold at least `ln(2k)/ln(k/(k-1))` events — the point below
-  which a uniform assignment would usually leave a fold empty. The bound is on
-  the event count, not on the number of stored non-zeros, so a single cell
-  holding many events can fill many folds.
+  and the tensor must hold at least `ln(k/1e-6)/ln(k/(k-1))` events — 21 for
+  `k=2`, 70 for `k=5`, 153 for `k=10`. That is the point below which an empty
+  fold stops being negligible: folds are redrawn until every one has training and
+  validation events, and redrawing conditions the multinomial, so it is only
+  harmless where it essentially never fires. The bound is on the event count, not
+  on the number of stored non-zeros, so a single cell holding many events can
+  fill many folds.
 
 - **`:evaluation-function` protocol changed**: fold metrics are now called as
   `(fn validation-tensor approximation factor-matrix-vector prediction-scale
