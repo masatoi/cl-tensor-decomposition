@@ -197,7 +197,10 @@ Used to measure how much each factor contributes to the reconstruction."
 For each factor r, computes:
   contribution(r) = KL(X, X^_{-r}) - KL(X, X^)
 
-where X^_{-r} is the reconstruction excluding factor r.
+where X^_{-r} is the reconstruction excluding factor r. Both KL values are the
+generalized KL of SPARSE-KL-DIVERGENCE, i.e. they include the predicted mass on
+the implicit-zero coordinates; the reduced model's mass is obtained by removing
+factor r's own component mass.
 
 Returns a vector of contributions, one per factor.
 Higher values indicate the factor is more important for reconstruction."
@@ -209,14 +212,23 @@ Higher values indicate the factor is more important for reconstruction."
          (contributions (make-array r :element-type 'double-float :initial-element 0.0d0))
          (x^-full (make-array nnz :element-type 'double-float :initial-element 0.0d0))
          (x^-partial (make-array nnz :element-type 'double-float :initial-element 0.0d0))
-         (*epsilon* epsilon))
+         (*epsilon* epsilon)
+         ;; Per-component predicted mass; dropping factor r from the model simply
+         ;; drops its mass, so the reduced model's total mass needs no recompute.
+         (component-masses (%cp-component-masses factor-matrix-vector))
+         (total-mass (loop for ri from 0 below r
+                           sum (aref component-masses ri)
+                           double-float)))
     ;; Compute full reconstruction KL
     (sdot factor-matrix-vector x-indices-matrix x^-full)
-    (let ((kl-full (sparse-kl-divergence x-indices-matrix x-value-vector x^-full)))
+    (let ((kl-full (+ (%sparse-kl-local-term x-indices-matrix x-value-vector x^-full)
+                      total-mass)))
       ;; Compute KL without each factor
       (loop for factor-index from 0 below r do
         (sdot-excluding-factor factor-matrix-vector x-indices-matrix x^-partial factor-index)
-        (let ((kl-partial (sparse-kl-divergence x-indices-matrix x-value-vector x^-partial)))
+        (let ((kl-partial (+ (%sparse-kl-local-term x-indices-matrix x-value-vector
+                                                    x^-partial)
+                             (- total-mass (aref component-masses factor-index)))))
           (setf (aref contributions factor-index)
                 (- kl-partial kl-full)))))
     contributions))
