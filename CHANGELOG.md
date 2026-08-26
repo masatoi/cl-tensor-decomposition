@@ -8,6 +8,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Breaking Changes
 
+- **`sparse-kl-divergence` now requires the factor matrices**: the loss over the
+  implicit-zero coordinates depends on the model, so the function takes a fourth
+  argument. Unregistered coordinates are observed zeros, not missing values, and
+  the objective is the generalized (Poisson) KL divergence:
+
+  ```
+  D(X||X^) = sum_{i in nnz} [ x_i log(x_i / x^_i) - x_i ]  +  sum_i x^_i
+  ```
+
+  The old three-argument form summed only the stored non-zeros and therefore
+  understated the loss by the predicted mass of every implicit zero.
+
+  **Before:**
+  ```lisp
+  (sparse-kl-divergence indices values x-hat)
+  ```
+
+  **After:**
+  ```lisp
+  (sdot factors indices x-hat)
+  (sparse-kl-divergence indices values x-hat factors)
+  ```
+
+  The total predicted mass is aggregated from the CP structure as
+  `sum_r prod_m (sum_j A^(m)_{j,r})` in `O(R * sum_m I_m)` time; no dense tensor
+  is materialized.
+
+  Custom `:evaluation-function` arguments to `cross-validate-rank`,
+  `select-rank` and `select-rank-1se` are now called with four arguments
+  `(indices counts approx factor-matrices)` to match.
+
 - **`decomposition` now accepts only `sparse-tensor`**: The legacy API
   `(decomposition shape indices values ...)` has been removed. You must now
   create a `sparse-tensor` first using `make-sparse-tensor`, then pass it to
@@ -23,6 +54,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (let ((tensor (make-sparse-tensor x-shape x-indices x-values)))
     (decomposition tensor :r 5))
   ```
+
+### Fixed
+
+- **`final-kl` now describes the returned factor matrices**: `decomposition-inner`
+  used to score the reconstruction from *before* the iteration's update, so the
+  reported `final-kl` (and the last `kl-history` entry) belonged to an earlier
+  model state. Each cycle now updates a mode, re-runs `sdot`, and only then
+  computes the KL divergence.
 
 ### Added
 
@@ -54,7 +93,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `tensor-decomposition-error` - Base condition
   - `invalid-input-error` - Validation failures with `:reason` and `:details`
   - `numerical-instability-error` - NaN/Inf detection
-  - `convergence-failure-error` - Failed convergence
 
 - **Diagnostic metrics** via `:include-diagnostics t` in `generate-factor-cards`:
   - Factor similarity matrix and redundancy score

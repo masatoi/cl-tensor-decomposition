@@ -219,7 +219,13 @@ Embedded patterns:
           (multiple-value-bind (fm-later iterations-later)
               (cltd:decomposition tensor :r 3 :n-cycle 100 :verbose nil)
             (declare (ignore iterations-later))
-            (let ((kl-later (cltd:sparse-kl-divergence x-indices x-values fm-later)))
+            (let* ((x-hat (make-array (length x-values)
+                                      :element-type 'double-float
+                                      :initial-element 0d0))
+                   (kl-later (progn
+                               (cltd:sdot fm-later x-indices x-hat)
+                               (cltd:sparse-kl-divergence x-indices x-values
+                                                          x-hat fm-later))))
               ;; Just check KL is finite and positive
               (ok (and (numberp kl-later) (plusp kl-later) (= kl-later kl-later))
                   (format nil "KL divergence is valid: ~,4F" kl-later)))))))))

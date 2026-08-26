@@ -136,8 +136,12 @@ Returns the factor cards alist."
       (format t "Converged in ~D iterations~%" iterations)
 
       ;; Compute KL divergence
-      (let ((kl (sparse-kl-divergence x-indices x-values factor-matrices)))
-        (format t "Final KL divergence: ~,4F~%" kl))
+      (let ((x-hat (make-array (length x-values)
+                               :element-type 'double-float
+                               :initial-element 0d0)))
+        (sdot factor-matrices x-indices x-hat)
+        (format t "Final KL divergence: ~,4F~%"
+                (sparse-kl-divergence x-indices x-values x-hat factor-matrices)))
 
       ;; Generate factor cards
       (let* ((metadata (build-mode-metadata))

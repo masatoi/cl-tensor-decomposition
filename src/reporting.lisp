@@ -440,7 +440,7 @@ for backward compatibility."
                   (sdot factor-matrix-vector x-indices-matrix x^-value-vector))
                  (kl-divergence
                   (sparse-kl-divergence x-indices-matrix x-value-vector
-                   x^-value-vector))
+                   x^-value-vector factor-matrix-vector))
                  (similarity-matrix
                   (compute-factor-similarity-matrix factor-matrix-vector))
                  (similar-pairs

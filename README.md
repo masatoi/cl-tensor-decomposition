@@ -40,10 +40,10 @@ ros install masatoi/cl-tensor-decomposition
 (decomposition *tensor* :n-cycle 10 :r 2 :verbose t)
 
 #|
-cycle: 1, kl-divergence: 9.594987
-cycle: 2, kl-divergence: 8.59509
+cycle: 1, kl-divergence: 13.444468
+cycle: 2, kl-divergence: 12.223802
 ...
-cycle: 10, kl-divergence: 0.7493448
+cycle: 10, kl-divergence: 2.2586484
 #(#2A((0.0 1.289) (0.734 0.0))
   #2A((0.0 1.333) (0.0 0.444) (1.719 0.0))
   #2A((0.0 0.436) (0.0 1.309) (0.0 0.0) (1.585 0.0)))
@@ -147,6 +147,51 @@ Use `select-rank` for k-fold cross-validation over candidate ranks:
 ### Model of a sparse tensor
 A sparse tensor consists of pairs of non-zero values and indices.
 ![Tensor Data Image](./docs/images/tensor-data-image.png)
+
+A coordinate that is absent from the index matrix is an **observed zero**, not a
+missing value. There is no observation mask: the tensor is dense in meaning and
+sparse only in storage.
+
+### Objective function
+
+`decomposition` minimises the generalized (Poisson) KL divergence between the
+observed tensor and its CP reconstruction:
+
+```
+D(X||X^) = sum_i [ x_i * log(x_i / x^_i) - x_i + x^_i ]
+```
+
+The sum runs over *every* coordinate, so the implicit zeros contribute their
+full reconstruction mass. `sparse-kl-divergence` evaluates it in two parts:
+
+```
+D(X||X^) = sum_{i in nnz} [ x_i * log(x_i / x^_i) - x_i ]  +  sum_i x^_i
+```
+
+The second term is the total predicted mass, aggregated straight from the CP
+structure rather than by expanding the tensor:
+
+```
+sum_i x^_i = sum_r prod_m ( sum_j A^(m)_{j,r} )
+```
+
+which costs `O(R * sum_m I_m)` and allocates no dense array. Because that term
+depends on the factor matrices, `sparse-kl-divergence` takes them as a fourth
+argument:
+
+```lisp
+(let ((x-hat (make-array (length values) :element-type 'double-float
+                         :initial-element 0d0)))
+  (sdot factors indices x-hat)
+  (sparse-kl-divergence indices values x-hat factors))
+```
+
+`x-hat` and `factors` must describe the same model state, so call `sdot` after
+every factor update. Custom `:evaluation-function` arguments to
+`cross-validate-rank` / `select-rank` receive the same four arguments.
+
+The logarithm divides by `x^ + *epsilon*` so an underflowed reconstruction
+cannot yield `-infinity`; `*epsilon*` is not added to the total predicted mass.
 
 ## Reference
 

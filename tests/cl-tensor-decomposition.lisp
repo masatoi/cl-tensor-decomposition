@@ -19,6 +19,62 @@
 
 (defparameter +test-epsilon+ 1d-6)
 
+;;; ---------------------------------------------------------------------------
+;;; Generalized KL divergence over implicit zeros
+;;;
+;;; Unregistered coordinates are observed zeros, not missing values, so the
+;;; loss must include their reconstruction mass.  The helpers below enumerate
+;;; the dense tensor as a reference implementation; they exist for tests only
+;;; and must never be used by library code.
+;;; ---------------------------------------------------------------------------
+
+(defun %all-coordinates (shape)
+  "Return every coordinate of SHAPE as a list of index lists (test-only)."
+  (if (null shape)
+      (list '())
+      (loop for i from 0 below (car shape)
+            append (loop for rest in (%all-coordinates (cdr shape))
+                         collect (cons i rest)))))
+
+(defun %sparse-lookup (indices values coord)
+  "Return the observed value stored at COORD, or 0 when absent (test-only)."
+  (loop for row from 0 below (array-dimension indices 0)
+        when (loop for mode from 0 below (array-dimension indices 1)
+                   always (= (aref indices row mode) (nth mode coord)))
+          do (return (aref values row))
+        finally (return 0d0)))
+
+(defun %cp-predict (factor-matrix-vector coord)
+  "Evaluate the CP model at COORD by summing over rank-one components (test-only)."
+  (loop for ri from 0 below (array-dimension (svref factor-matrix-vector 0) 1)
+        sum (let ((prod 1d0))
+              (loop for mode from 0 below (length factor-matrix-vector)
+                    do (setf prod
+                             (* prod (aref (svref factor-matrix-vector mode)
+                                           (nth mode coord)
+                                           ri))))
+              prod)
+        double-float))
+
+(defun %dense-generalized-kl (shape factor-matrix-vector indices values
+                              &optional (epsilon cltd::*epsilon*))
+  "Reference generalized KL computed by enumerating the whole dense tensor (test-only)."
+  (loop for coord in (%all-coordinates shape)
+        sum (let ((x (%sparse-lookup indices values coord))
+                  (x-hat (%cp-predict factor-matrix-vector coord)))
+              (+ (if (> x 0d0)
+                     (* x (log (/ x (+ x-hat epsilon))))
+                     0d0)
+                 (- x)
+                 x-hat))
+        double-float))
+
+(defun %dense-total-mass (shape factor-matrix-vector)
+  "Sum the CP reconstruction over every coordinate of SHAPE (test-only)."
+  (loop for coord in (%all-coordinates shape)
+        sum (%cp-predict factor-matrix-vector coord)
+        double-float))
+
 (deftest initialize-matrix-fills-matrix
   (let ((matrix (make-array '(2 2) :element-type 'double-float :initial-element 0d0)))
     (cltd:initialize-matrix matrix 2d0)
@@ -46,20 +102,30 @@
           "initialize-random-matrix draws reproducible values"))))
 
 (deftest sparse-kl-divergence-matches-manual
-  (let* ((approx (make-array 3 :element-type 'double-float
-                             :initial-contents '(1.5d0 1.8d0 2.5d0)))
+  (let* ((mode0 (make-array '(2 1) :element-type 'double-float
+                            :initial-contents '((0.5d0) (1.5d0))))
+         (mode1 (make-array '(3 1) :element-type 'double-float
+                            :initial-contents '((0.4d0) (1.2d0) (0.9d0))))
+         (mode2 (make-array '(4 1) :element-type 'double-float
+                            :initial-contents '((1.1d0) (0.7d0) (0.3d0) (1.4d0))))
+         (factors (make-array 3 :initial-contents (list mode0 mode1 mode2)))
          (values (make-array 3 :element-type 'double-float
                              :initial-contents '(1d0 2d0 3d0)))
-         (kl (cltd:sparse-kl-divergence X-indices-matrix values approx))
+         (approx (make-array 3 :element-type 'double-float :initial-element 0d0))
          (epsilon cltd::*epsilon*)
          (expected 0d0))
+    (cltd:sdot factors X-indices-matrix approx)
+    ;; Local term over the stored non-zeros ...
     (loop for idx from 0 below (length values) do
       (let* ((x (aref values idx))
              (xhat (aref approx idx)))
-        (incf expected (+ (* x (log (/ x (+ xhat epsilon))))
-                          (- x)
-                          xhat))))
-    (ok (< (abs (- kl expected)) +test-epsilon+)
+        (incf expected (- (* x (log (/ x (+ xhat epsilon))))
+                          x))))
+    ;; ... plus the predicted mass of every coordinate, implicit zeros included.
+    (incf expected (%dense-total-mass X-shape factors))
+    (ok (< (abs (- (cltd:sparse-kl-divergence X-indices-matrix values approx factors)
+                   expected))
+           +test-epsilon+)
         "sparse-kl-divergence matches manual computation")))
 
 (deftest sdot-multiplies-factors-into-reconstruction
@@ -207,16 +273,22 @@
     (ok (every #'numberp scores) "Single-fold score is numeric")))
 
 (deftest cross-validate-rank-is-reproducible-with-same-random-state
+  ;; :RANDOM-STATE only seeds the fold splits; the initial factor matrices are
+  ;; drawn from *RANDOM-STATE*. Since the validation score depends on the fitted
+  ;; factors (its total predicted mass does), both sources must be pinned to
+  ;; compare two runs exactly.
   (let* ((seed (make-random-state t))
          (ranks '(1 2))
-         (first-run (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
-                                              :k 3
-                                              :n-cycle 10
-                                              :random-state (make-random-state seed)))
-         (second-run (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
-                                               :k 3
-                                               :n-cycle 10
-                                               :random-state (make-random-state seed)))
+         (first-run (let ((*random-state* (make-random-state seed)))
+                      (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
+                                                :k 3
+                                                :n-cycle 10
+                                                :random-state (make-random-state seed))))
+         (second-run (let ((*random-state* (make-random-state seed)))
+                       (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
+                                                 :k 3
+                                                 :n-cycle 10
+                                                 :random-state (make-random-state seed))))
          (no-seed (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
                                             :k 3
                                             :n-cycle 10)))
@@ -226,8 +298,8 @@
         "Cross-validation still returns results without random-state")))
 
 (deftest cross-validate-rank-respects-custom-evaluation-function
-  (labels ((always-42 (indices counts approx)
-             (declare (ignore indices counts approx))
+  (labels ((always-42 (indices counts approx factor-matrices)
+             (declare (ignore indices counts approx factor-matrices))
              42d0))
     (let ((results (cltd:cross-validate-rank X-indices-matrix X-value-vector '(1 2)
                                              :k 2
@@ -918,7 +990,12 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
                                :initial-contents '(10.0d0 0.0d0 5.0d0)))
          (x-hat (make-array 3 :element-type 'double-float
                             :initial-contents '(9.0d0 1.0d0 6.0d0)))
-         (kl (cltd:sparse-kl-divergence indices x-values x-hat)))
+         (factors (make-array 2 :initial-contents
+                              (list (make-array '(2 1) :element-type 'double-float
+                                                :initial-contents '((3.0d0) (2.0d0)))
+                                    (make-array '(2 1) :element-type 'double-float
+                                                :initial-contents '((3.0d0) (0.5d0))))))
+         (kl (cltd:sparse-kl-divergence indices x-values x-hat factors)))
     (ok (numberp kl)
         "KL divergence is a number")
     (ok (not (cltd:%float-nan-p kl))
@@ -1500,7 +1577,12 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
                                :initial-contents '(10.0d0)))
          (x-hat (make-array 1 :element-type 'double-float
                             :initial-contents '(8.0d0)))
-         (kl (cltd:sparse-kl-divergence indices x-values x-hat)))
+         (factors (make-array 2 :initial-contents
+                              (list (make-array '(1 1) :element-type 'double-float
+                                                :initial-contents '((4.0d0)))
+                                    (make-array '(1 1) :element-type 'double-float
+                                                :initial-contents '((2.0d0))))))
+         (kl (cltd:sparse-kl-divergence indices x-values x-hat factors)))
     (ok (numberp kl)
         "KL divergence is a number")
     (ok (not (cltd:%float-nan-p kl))
@@ -1557,7 +1639,12 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
                                :initial-contents '(1.0d10 5.0d9 2.0d10)))
          (x-hat (make-array 3 :element-type 'double-float
                             :initial-contents '(9.0d9 6.0d9 1.8d10)))
-         (kl (cltd:sparse-kl-divergence indices x-values x-hat)))
+         (factors (make-array 2 :initial-contents
+                              (list (make-array '(2 1) :element-type 'double-float
+                                                :initial-contents '((1.0d5) (1.0d5)))
+                                    (make-array '(2 1) :element-type 'double-float
+                                                :initial-contents '((1.0d5) (1.0d5))))))
+         (kl (cltd:sparse-kl-divergence indices x-values x-hat factors)))
     (ok (numberp kl)
         "KL divergence is a number with large values")
     (ok (not (cltd:%float-nan-p kl))
@@ -1621,7 +1708,12 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
                                :initial-contents '(1.0d-100 1.0d-100 1.0d-100)))
          (x-hat (make-array 3 :element-type 'double-float
                             :initial-contents '(1.0d-100 1.0d-100 1.0d-100)))
-         (kl (cltd:sparse-kl-divergence indices x-values x-hat)))
+         (factors (make-array 2 :initial-contents
+                              (list (make-array '(2 1) :element-type 'double-float
+                                                :initial-contents '((1.0d-50) (1.0d-50)))
+                                    (make-array '(2 1) :element-type 'double-float
+                                                :initial-contents '((1.0d-50) (1.0d-50))))))
+         (kl (cltd:sparse-kl-divergence indices x-values x-hat factors)))
     (ok (numberp kl)
         "KL divergence is a number with tiny values")
     (ok (not (cltd:%float-nan-p kl))
@@ -1899,20 +1991,6 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
         "Location accessor works")
     (ok (equal (cltd:instability-operation condition) "test-op")
         "Operation accessor works")))
-
-(deftest condition-convergence-failure-error-hierarchy
-  "convergence-failure-error is a subtype of tensor-decomposition-error."
-  (let ((condition (make-condition 'cltd:convergence-failure-error
-                                   :iterations 100
-                                   :final-kl 1.5d0)))
-    (ok (typep condition 'cltd:tensor-decomposition-error)
-        "convergence-failure-error is a tensor-decomposition-error")
-    (ok (typep condition 'error)
-        "convergence-failure-error is an error")
-    (ok (= (cltd:convergence-iterations condition) 100)
-        "Iterations accessor works")
-    (ok (< (abs (- (cltd:convergence-final-kl condition) 1.5d0)) 1.0d-10)
-        "Final-kl accessor works")))
 
 (deftest make-sparse-tensor-validates-input
   "make-sparse-tensor validates input and signals invalid-input-error for bad data."
@@ -2233,3 +2311,131 @@ threshold = best_mean + best_std / sqrt(k)"
             (format nil "Selected smallest rank (~D) within threshold"
                     selected-rank))))))
 
+
+(deftest sparse-kl-divergence-includes-implicit-zero-mass
+  "Every coordinate of a 2x2 rank-1 model predicts 2, so the total mass is 8."
+  (let* ((mode0 (make-array '(2 1) :element-type 'double-float
+                            :initial-contents '((2d0) (2d0))))
+         (mode1 (make-array '(2 1) :element-type 'double-float
+                            :initial-contents '((1d0) (1d0))))
+         (factors (make-array 2 :initial-contents (list mode0 mode1)))
+         (indices (make-array '(1 2) :element-type 'fixnum
+                              :initial-contents '((0 0))))
+         (values (make-array 1 :element-type 'double-float
+                             :initial-contents '(1d0)))
+         (x-hat (make-array 1 :element-type 'double-float :initial-element 0d0)))
+    (cltd:sdot factors indices x-hat)
+    (ok (< (abs (- (aref x-hat 0) 2d0)) +test-epsilon+)
+        "Reconstruction at the observed coordinate is 2")
+    (let ((kl (cltd:sparse-kl-divergence indices values x-hat factors))
+          (expected (+ 8d0 (log (/ 1d0 2d0)) -1d0)))
+      (ok (< (abs (- kl expected)) 1d-5)
+          (format nil "KL ~,9F matches ~,9F including implicit-zero mass"
+                  kl expected))
+      (ok (> kl 6d0)
+          "KL is not the nnz-only value (~0.30685) of the old implementation"))))
+
+(deftest sparse-kl-divergence-matches-dense-enumeration
+  "Sparse KL agrees with a dense enumeration of the generalized KL objective."
+  (let* ((shape '(3 2 4))
+         (mode0 (make-array '(3 2) :element-type 'double-float
+                            :initial-contents '((0.7d0 0.2d0)
+                                                (0.1d0 0.9d0)
+                                                (0.4d0 0.5d0))))
+         (mode1 (make-array '(2 2) :element-type 'double-float
+                            :initial-contents '((1.3d0 0.6d0)
+                                                (0.8d0 1.1d0))))
+         (mode2 (make-array '(4 2) :element-type 'double-float
+                            :initial-contents '((0.3d0 1.2d0)
+                                                (0.9d0 0.4d0)
+                                                (1.5d0 0.7d0)
+                                                (0.2d0 0.8d0))))
+         (factors (make-array 3 :initial-contents (list mode0 mode1 mode2)))
+         (indices (make-array '(5 3) :element-type 'fixnum
+                              :initial-contents '((0 0 0)
+                                                  (1 1 2)
+                                                  (2 0 3)
+                                                  (0 1 1)
+                                                  (2 1 0))))
+         (values (make-array 5 :element-type 'double-float
+                             :initial-contents '(2d0 5d0 1d0 3d0 4d0)))
+         (x-hat (make-array 5 :element-type 'double-float :initial-element 0d0)))
+    (cltd:sdot factors indices x-hat)
+    (let ((sparse-kl (cltd:sparse-kl-divergence indices values x-hat factors))
+          (dense-kl (%dense-generalized-kl shape factors indices values)))
+      (ok (< (abs (- sparse-kl dense-kl)) 1d-9)
+          (format nil "Sparse KL ~,9F matches dense reference ~,9F"
+                  sparse-kl dense-kl)))))
+
+(deftest cp-total-mass-matches-dense-sum
+  "Total predicted mass aggregated from CP structure equals the dense sum."
+  (let* ((shape '(3 2 4))
+         (mode0 (make-array '(3 2) :element-type 'double-float
+                            :initial-contents '((0.7d0 0.2d0)
+                                                (0.1d0 0.9d0)
+                                                (0.4d0 0.5d0))))
+         (mode1 (make-array '(2 2) :element-type 'double-float
+                            :initial-contents '((1.3d0 0.6d0)
+                                                (0.8d0 1.1d0))))
+         (mode2 (make-array '(4 2) :element-type 'double-float
+                            :initial-contents '((0.3d0 1.2d0)
+                                                (0.9d0 0.4d0)
+                                                (1.5d0 0.7d0)
+                                                (0.2d0 0.8d0))))
+         (factors (make-array 3 :initial-contents (list mode0 mode1 mode2))))
+    (ok (< (abs (- (cltd::%cp-total-mass factors)
+                   (%dense-total-mass shape factors)))
+           1d-9)
+        "%cp-total-mass equals the sum of the dense reconstruction")))
+
+(deftest sparse-kl-divergence-ignores-explicit-zeros
+  "An explicitly stored zero must not add its reconstruction mass twice."
+  (let* ((mode0 (make-array '(2 2) :element-type 'double-float
+                            :initial-contents '((0.6d0 0.4d0)
+                                                (0.3d0 0.7d0))))
+         (mode1 (make-array '(3 2) :element-type 'double-float
+                            :initial-contents '((0.5d0 0.5d0)
+                                                (0.4d0 0.6d0)
+                                                (0.9d0 0.1d0))))
+         (factors (make-array 2 :initial-contents (list mode0 mode1)))
+         (dense-indices (make-array '(3 2) :element-type 'fixnum
+                                    :initial-contents '((0 0) (0 1) (1 2))))
+         (dense-values (make-array 3 :element-type 'double-float
+                                   :initial-contents '(2d0 0d0 5d0)))
+         (dense-hat (make-array 3 :element-type 'double-float :initial-element 0d0))
+         (lean-indices (make-array '(2 2) :element-type 'fixnum
+                                   :initial-contents '((0 0) (1 2))))
+         (lean-values (make-array 2 :element-type 'double-float
+                                  :initial-contents '(2d0 5d0)))
+         (lean-hat (make-array 2 :element-type 'double-float :initial-element 0d0)))
+    (cltd:sdot factors dense-indices dense-hat)
+    (cltd:sdot factors lean-indices lean-hat)
+    (let ((with-zero (cltd:sparse-kl-divergence dense-indices dense-values
+                                                dense-hat factors))
+          (without-zero (cltd:sparse-kl-divergence lean-indices lean-values
+                                                   lean-hat factors)))
+      (ok (< (abs (- with-zero without-zero)) 1d-12)
+          (format nil "Explicit zero leaves KL unchanged (~,9F vs ~,9F)"
+                  with-zero without-zero)))))
+
+(deftest decomposition-final-kl-matches-final-factors
+  "FINAL-KL and the last KL-HISTORY entry describe the returned factor matrices."
+  (let* ((shape '(3 4))
+         (indices (make-array '(4 2) :element-type 'fixnum
+                              :initial-contents '((0 0) (1 1) (2 2) (0 3))))
+         (values (make-array 4 :element-type 'double-float
+                             :initial-contents '(3d0 1d0 4d0 2d0)))
+         (tensor (cltd:make-sparse-tensor shape indices values))
+         (*random-state* (cltd:%seed-random-state 7)))
+    (multiple-value-bind (factors iterations final-kl kl-history)
+        (cltd:decomposition tensor :r 2 :n-cycle 20)
+      (declare (ignore iterations))
+      (let ((x-hat (make-array 4 :element-type 'double-float :initial-element 0d0)))
+        (cltd:sdot factors indices x-hat)
+        (let ((recomputed (cltd:sparse-kl-divergence indices values x-hat factors)))
+          (ok (< (abs (- final-kl recomputed)) 1d-9)
+              (format nil "final-kl ~,9F equals KL recomputed from final factors ~,9F"
+                      final-kl recomputed))
+          (ok (< (abs (- (aref kl-history (1- (length kl-history))) recomputed))
+                 1d-9)
+              "Last kl-history entry equals KL recomputed from final factors"))))))

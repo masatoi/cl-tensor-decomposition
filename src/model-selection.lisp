@@ -97,6 +97,9 @@ VALID-INDICES, VALID-COUNTS are the validation set sparse tensor.
 RANK is the number of latent factors to use.
 N-CYCLE, CONVERGENCE-THRESHOLD, CONVERGENCE-WINDOW control decomposition.
 EVALUATION-FUNCTION computes the validation score (default: sparse-kl-divergence).
+It is called as (funcall fn valid-indices valid-counts approx factor-matrices),
+matching the SPARSE-KL-DIVERGENCE lambda list; metrics that ignore the model
+structure can simply declare the fourth argument ignored.
 VERBOSE controls output during decomposition.
 
 Returns the evaluation score on the validation set."
@@ -110,7 +113,8 @@ Returns the evaluation score on the validation set."
              (make-array (length valid-counts) :element-type 'double-float
                          :initial-element 0.0d0)))
         (sdot factor-matrix-vector valid-indices approx)
-        (funcall evaluation-function valid-indices valid-counts approx)))))
+        (funcall evaluation-function valid-indices valid-counts approx
+                 factor-matrix-vector)))))
 
 (defun cross-validate-rank (indices counts ranks &key (k 5)
                                     (n-cycle 100)
@@ -126,7 +130,8 @@ COUNTS is the observation count vector.
 RANKS is a list of rank values to evaluate.
 K is the number of cross-validation folds (default 5).
 N-CYCLE, CONVERGENCE-THRESHOLD, CONVERGENCE-WINDOW control decomposition.
-EVALUATION-FUNCTION computes validation score (default: sparse-kl-divergence).
+EVALUATION-FUNCTION computes validation score (default: sparse-kl-divergence);
+it is called as (fn valid-indices valid-counts approx factor-matrices).
 RANDOM-STATE controls fold randomization for reproducibility.
 VERBOSE controls output during decomposition.
 

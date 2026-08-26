@@ -52,9 +52,6 @@
            :instability-location
            :instability-value
            :instability-operation
-           :convergence-failure-error
-           :convergence-iterations
-           :convergence-final-kl
            ;; validation
            :validate-input-data
            ;; portable helpers for testing
@@ -128,21 +125,6 @@
                      (instability-value condition)
                      (instability-operation condition))))
   (:documentation "Signaled when NaN, Inf, or unexpected negative values are encountered."))
-
-(define-condition convergence-failure-error (tensor-decomposition-error)
-  ((iterations :initarg :iterations
-               :reader convergence-iterations
-               :type fixnum
-               :documentation "Number of iterations completed before failure")
-   (final-kl :initarg :final-kl
-             :reader convergence-final-kl
-             :type double-float
-             :documentation "Final KL divergence value at failure"))
-  (:report (lambda (condition stream)
-             (format stream "Decomposition failed to converge after ~D iterations (final KL=~,6F)"
-                     (convergence-iterations condition)
-                     (convergence-final-kl condition))))
-  (:documentation "Signaled when decomposition fails to converge within allowed iterations."))
 
 ;;; ============================================================
 ;;; Input Validation
@@ -286,24 +268,118 @@ returns (values NIL reason details)."
       (setf (aref matrix i j) (random 1.0d0))))
   matrix)
 
-(defun sparse-kl-divergence (X-indices-matrix X-value-vector X^-value-vector)
-  "Compute the Kullback–Leibler divergence between sparse counts and their approximation.
-When x=0, the x*log(x/x^) term contributes 0 (limit as x→0+), so we only add x^ - x = x^."
+(defun %cp-component-masses (factor-matrix-vector)
+  "Return the predicted mass contributed by each rank-one component of the CP model.
+
+For component r the mass is the product of that column's sum over every mode:
+
+  m_r = prod_m (sum_j A^(m)_{j,r})
+
+Because the CP model factorizes, summing m_r over all components yields the
+reconstruction mass of the *entire* tensor, implicit zeros included, without
+enumerating any coordinate.
+
+FACTOR-MATRIX-VECTOR - Vector of factor matrices (one per mode)
+
+Returns a double-float vector of length R. Runs in O(R * sum_m I_m) time and
+O(R) space; no dense tensor is materialized."
+  (declare (optimize (speed 3) (safety 0))
+           (type simple-array factor-matrix-vector))
+  (let* ((rank (array-dimension (svref factor-matrix-vector 0) 1))
+         (masses (make-array rank :element-type 'double-float
+                             :initial-element 1.0d0)))
+    (declare (type fixnum rank)
+             (type (simple-array double-float (*)) masses))
+    (loop for mode fixnum from 0 below (length factor-matrix-vector)
+          do (let ((factor-matrix (svref factor-matrix-vector mode)))
+               (declare (type (simple-array double-float) factor-matrix))
+               (loop for ri fixnum from 0 below rank
+                     do (setf (aref masses ri)
+                              (* (aref masses ri)
+                                 (loop for i fixnum
+                                         from 0 below (array-dimension factor-matrix 0)
+                                       sum (aref factor-matrix i ri)
+                                       double-float))))))
+    masses))
+
+(defun %cp-total-mass (factor-matrix-vector)
+  "Return sum_i x^_i over *every* coordinate of the CP reconstruction.
+
+This is the total predicted mass of the model, aggregated from the factor
+matrices via %CP-COMPONENT-MASSES rather than by expanding the tensor, so it
+costs O(R * sum_m I_m) and never allocates a dense array."
+  (declare (optimize (speed 3) (safety 0))
+           (type simple-array factor-matrix-vector))
+  (let ((masses (%cp-component-masses factor-matrix-vector)))
+    (declare (type (simple-array double-float (*)) masses))
+    (loop for ri fixnum from 0 below (length masses)
+          sum (aref masses ri)
+          double-float)))
+
+(defun %sparse-kl-local-term (X-indices-matrix X-value-vector X^-value-vector)
+  "Accumulate the stored-non-zero part of the generalized KL divergence.
+
+Returns sum over the rows of X-INDICES-MATRIX of
+
+  x_i * log(x_i / (x^_i + *epsilon*)) - x_i
+
+Entries whose observed value is zero contribute nothing here: for them the
+limit x*log(x/y) as x->0+ is 0, and their remaining -x + x^ part belongs to the
+total predicted mass, so adding it here would double-count it.
+
+The +x^ term is likewise omitted for every entry, since the total predicted
+mass already covers all coordinates including the stored ones."
   (declare (optimize (speed 3) (safety 0))
            (type (simple-array fixnum) X-indices-matrix)
            (type (simple-array double-float) X-value-vector X^-value-vector))
   (loop for datum-index fixnum from 0 below (array-dimension X-indices-matrix 0)
         sum (let ((x (aref X-value-vector datum-index))
                   (x^ (aref X^-value-vector datum-index)))
+              (declare (type double-float x x^))
               (if (> x 0.0d0)
-                  ;; Standard KL: x*log(x/x^) - x + x^
-                  (+ (* x (the double-float
+                  (- (* x (the double-float
                               (log (/ x (+ x^ (the double-float *epsilon*))))))
-                     (- x)
-                     x^)
-                  ;; When x=0: lim_{x->0+} x*log(x/y) = 0, so just add -x + x^ = x^
-                  x^))
+                     x)
+                  0.0d0))
         double-float))
+
+(defun sparse-kl-divergence (X-indices-matrix X-value-vector X^-value-vector
+                             factor-matrix-vector)
+  "Compute the generalized (Poisson) KL divergence between a sparse tensor and
+its CP reconstruction:
+
+  D(X||X^) = sum_i [ x_i * log(x_i / x^_i) - x_i + x^_i ]
+
+Coordinates absent from X-INDICES-MATRIX are *observed zeros*, not missing
+values, so their reconstruction still contributes to the loss. The sum
+therefore splits into a term over the stored non-zeros and the total predicted
+mass of the model:
+
+  D(X||X^) = sum_{i in nnz} [ x_i * log(x_i / x^_i) - x_i ] + sum_i x^_i
+
+The trailing term is aggregated from the CP structure by %CP-TOTAL-MASS in
+O(R * sum_m I_m) time, so the whole computation stays sparse.
+
+X-INDICES-MATRIX     - Sparse tensor indices, shape (nnz, n-modes)
+X-VALUE-VECTOR       - Observed counts at each stored index
+X^-VALUE-VECTOR      - Reconstruction at the stored indices, as produced by SDOT
+FACTOR-MATRIX-VECTOR - The factor matrices that produced X^-VALUE-VECTOR
+
+X^-VALUE-VECTOR and FACTOR-MATRIX-VECTOR must describe the same model state;
+callers are responsible for calling SDOT before this function whenever the
+factors have changed.
+
+Numerical stabilization: the logarithm divides by x^ + *epsilon* so that an
+underflowed reconstruction cannot produce -infinity or NaN. This biases the
+result by O(*epsilon*) per non-zero entry. *epsilon* is deliberately NOT added
+to the total predicted mass, which needs no such guard and where the bias would
+otherwise scale with the number of coordinates in the tensor."
+  (declare (optimize (speed 3) (safety 0))
+           (type (simple-array fixnum) X-indices-matrix)
+           (type (simple-array double-float) X-value-vector X^-value-vector)
+           (type simple-array factor-matrix-vector))
+  (+ (%sparse-kl-local-term X-indices-matrix X-value-vector X^-value-vector)
+     (%cp-total-mass factor-matrix-vector)))
 
 (defun calc-denominator (factor-matrix-vector factor-index denominator-tmp)
   "Compute the normalization denominator for multiplicative update.
@@ -436,6 +512,10 @@ DENOMINATOR-TMP      - Temporary storage for denominator computation"
                             &key verbose convergence-threshold convergence-window)
   "Iteratively update FACTOR-MATRIX-VECTOR up to N-CYCLE steps, honoring convergence controls.
 
+Each cycle updates one mode, refreshes X^-VALUE-VECTOR from the updated factors
+via SDOT, and only then scores the model, so the returned FINAL-KL always
+corresponds to the factor matrices left in FACTOR-MATRIX-VECTOR.
+
 Returns four values:
   1. Number of iterations executed
   2. Final KL divergence value
@@ -459,13 +539,18 @@ Returns four values:
          (final-kl 0d0)
          (converged-p nil))
     (block done
+      ;; Seed the reconstruction from the initial factors; from here on every
+      ;; iteration re-runs SDOT *after* its update, so the reconstruction, the
+      ;; factor matrices and the reported KL always describe the same state.
+      (sdot factor-matrix-vector X-indices-matrix X^-value-vector)
       (loop for i from 0 below n-cycle do
-        (sdot factor-matrix-vector X-indices-matrix X^-value-vector)
         (update X-indices-matrix X-value-vector X^-value-vector
                 factor-matrix-vector (mod i (length factor-matrix-vector)) 
                 numerator-tmp denominator-tmp)
+        (sdot factor-matrix-vector X-indices-matrix X^-value-vector)
         ;; Always compute KL divergence for history
-        (let ((kl-value (sparse-kl-divergence X-indices-matrix X-value-vector X^-value-vector)))
+        (let ((kl-value (sparse-kl-divergence X-indices-matrix X-value-vector
+                                              X^-value-vector factor-matrix-vector)))
           (vector-push-extend kl-value kl-history)
           (setf final-kl kl-value)
           (when verbose
