@@ -223,13 +223,19 @@
     (ok (= (length splits) 2) "Two folds generated")
     (let ((all-indices (sort (copy-list (apply #'append splits)) #'<)))
       (ok (equal all-indices '(0 1 2)) "All indices covered exactly once")))
+  ;; The manual search below is compared against SELECT-RANK, so both runs must
+  ;; see identical randomness: :RANDOM-STATE seeds the fold splits, while the
+  ;; initial factor matrices come from *RANDOM-STATE* and the validation score
+  ;; depends on the factors they converge to.
   (let* ((ranks '(1 2))
-         (cv-results (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
-                                               :k 2
-                                               :n-cycle 10
-                                               :random-state (make-random-state t)
-                                               :convergence-threshold 1d-4
-                                               :convergence-window 3))
+         (seed (make-random-state t))
+         (cv-results (let ((*random-state* (make-random-state seed)))
+                       (cltd:cross-validate-rank X-indices-matrix X-value-vector ranks
+                                                 :k 2
+                                                 :n-cycle 10
+                                                 :random-state (make-random-state seed)
+                                                 :convergence-threshold 1d-4
+                                                 :convergence-window 3)))
          (best-rank nil)
          (best-mean most-positive-double-float))
     (ok (= (length cv-results) (length ranks))
@@ -241,12 +247,13 @@
           (setf best-mean mean
                 best-rank rank))))
     (multiple-value-bind (best all-results)
-        (cltd:select-rank X-indices-matrix X-value-vector ranks
-                          :k 2
-                          :n-cycle 10
-                          :random-state (make-random-state t)
-                          :convergence-threshold 1d-4
-                          :convergence-window 3)
+        (let ((*random-state* (make-random-state seed)))
+          (cltd:select-rank X-indices-matrix X-value-vector ranks
+                            :k 2
+                            :n-cycle 10
+                            :random-state (make-random-state seed)
+                            :convergence-threshold 1d-4
+                            :convergence-window 3))
       (ok (= (length all-results) (length ranks))
           "select-rank echoes full results")
       (ok (member (cdr (assoc :rank best)) ranks)
@@ -2226,24 +2233,28 @@ When x=0, the KL contribution simplifies to x-hat (the reconstruction value)."
 
 The 1-SE rule favors simpler models, so when the best rank has high variance,
 1-SE may select a smaller rank that is within one standard error of the best."
+  ;; Both calls must see identical randomness: :RANDOM-STATE pins the folds, and
+  ;; binding *RANDOM-STATE* pins the initial factor matrices, which the
+  ;; validation score depends on.
   (let* ((ranks '(1 2))
-         ;; Use a shared random state for both calls to ensure identical folds
          (seed-state (make-random-state t)))
     (multiple-value-bind (best-1se results-1se)
-        (cltd:select-rank-1se X-indices-matrix X-value-vector ranks
+        (let ((*random-state* (make-random-state seed-state)))
+          (cltd:select-rank-1se X-indices-matrix X-value-vector ranks
+                                :k 2
+                                :n-cycle 10
+                                :random-state (make-random-state seed-state)
+                                :convergence-threshold 1d-4
+                                :convergence-window 3))
+      (declare (ignore results-1se))
+      (multiple-value-bind (best-min results-min)
+          (let ((*random-state* (make-random-state seed-state)))
+            (cltd:select-rank X-indices-matrix X-value-vector ranks
                               :k 2
                               :n-cycle 10
                               :random-state (make-random-state seed-state)
                               :convergence-threshold 1d-4
-                              :convergence-window 3)
-      (declare (ignore results-1se))
-      (multiple-value-bind (best-min results-min)
-          (cltd:select-rank X-indices-matrix X-value-vector ranks
-                            :k 2
-                            :n-cycle 10
-                            :random-state (make-random-state seed-state)
-                            :convergence-threshold 1d-4
-                            :convergence-window 3)
+                              :convergence-window 3))
         (declare (ignore results-min))
         (let ((rank-1se (cdr (assoc :rank best-1se)))
               (rank-min (cdr (assoc :rank best-min))))
