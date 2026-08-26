@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Agent Guidelines
 
-@agents/repl-driven-development.md
-@agents/common-lisp-expert.md
+@prompts/repl-driven-development.md
+@prompts/common-lisp-expert.md
 
 ## Project Overview
 
