@@ -8,6 +8,81 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Breaking Changes
 
+- **Cross-validation now splits counts, not coordinates**: `cross-validate-rank`,
+  `select-rank` and `select-rank-1se` take a `sparse-tensor` instead of separate
+  `indices` and `counts` arguments, and folds are built by Poisson (multinomial)
+  count thinning.
+
+  Holding out whole coordinates was invalid for this data model: an unstored
+  coordinate is an observed zero, so the training tensor presented each held-out
+  cell as a zero and the model was then scored on recovering a positive count it
+  had been fitted to suppress. That systematically favoured the smallest rank.
+
+  **Before:**
+  ```lisp
+  (select-rank indices counts '(5 10 15) :k 3)
+  ```
+
+  **After:**
+  ```lisp
+  (select-rank tensor '(5 10 15) :k 5)
+  ```
+
+  Passing the tensor also keeps the declared shape and the mode metadata: folds
+  no longer re-infer the shape from the maximum observed coordinate, which could
+  silently drop categories that happened not to appear in a fold.
+
+  Requires non-negative **integer** counts; fractional values now signal
+  `invalid-input-error` rather than being truncated. `k` must be an integer >= 2,
+  and the tensor must hold at least `ln(k/1e-6)/ln(k/(k-1))` events — 21 for
+  `k=2`, 70 for `k=5`, 153 for `k=10`. That is the point below which an empty
+  fold stops being negligible: folds are redrawn until every one has training and
+  validation events, and redrawing conditions the multinomial, so it is only
+  harmless where it essentially never fires. The bound is on the event count, not
+  on the number of stored non-zeros, so a single cell holding many events can
+  fill many folds.
+
+- **`:evaluation-function` protocol changed**: fold metrics are now called as
+  `(fn validation-tensor approximation factor-matrix-vector prediction-scale
+  validation-count)`. `approximation` is the reconstruction at the validation
+  coordinates *at the training exposure*, so a metric must apply
+  `prediction-scale` itself.
+
+- **`make-fold-splits` removed**, together with the internal `%build-shape`,
+  `%tensor-dimensions`, `%subset-tensor` and `%complement-subset` helpers.
+  `make-poisson-folds` replaces it with count thinning.
+
+### Added
+
+- **`make-poisson-folds`** and `poisson-fold-tensors` / `poisson-folds-k` /
+  `poisson-folds-count` / `poisson-folds-tensor` /
+  `poisson-folds-prediction-scale`, exposing the thinned folds directly.
+
+- **`normalized-generalized-kl`**: the default fold score, the generalized KL per
+  validation event. Not the Poisson deviance — the deviance is twice this.
+
+- **`:prediction-scale` on `sparse-kl-divergence`**: multiplies every prediction,
+  the per-entry values *and* the total predicted mass, without mutating the
+  factor matrices. `*epsilon*` is added after scaling and is never scaled itself.
+  This is how the exposure ratio `1/(k-1)` between a fold's training and
+  validation halves is applied.
+
+- **`:standard-error` and `:validation-counts`** in each cross-validation result.
+
+### Fixed
+
+- **Cross-validation is reproducible and order-independent**: a single
+  `:random-state` now drives both the thinning and each fold's factor
+  initialization, and is copied rather than advanced. Folds are drawn once and
+  shared by all candidate ranks, with each fold's initialization fixed in
+  advance, so reordering `ranks` cannot change any rank's scores.
+
+- **`select-rank` no longer sorts `cv-results` in place**; the returned list keeps
+  its length and the input rank order. Ties break toward the smaller rank.
+
+- **Cross-validation is quiet unless `:verbose t`**; the unconditional progress
+  `format t` is gone.
+
 - **`sparse-kl-divergence` now requires the factor matrices**: the loss over the
   implicit-zero coordinates depends on the model, so the function takes a fourth
   argument. Unregistered coordinates are observed zeros, not missing values, and
@@ -36,8 +111,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   is materialized.
 
   Custom `:evaluation-function` arguments to `cross-validate-rank`,
-  `select-rank` and `select-rank-1se` are now called with four arguments
-  `(indices counts approx factor-matrices)` to match.
+  `select-rank` and `select-rank-1se` changed to match. They were superseded
+  again by the cross-validation rework above, which is the protocol they use
+  now; write new metrics against that one.
 
 - **`decomposition` now accepts only `sparse-tensor`**: The legacy API
   `(decomposition shape indices values ...)` has been removed. You must now

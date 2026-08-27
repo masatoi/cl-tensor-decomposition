@@ -304,13 +304,13 @@
   "Run cross-validation on the coupon tensor and return the best rank entry and all fold scores."
   (let ((random-state (make-random-state t)))
     (multiple-value-bind (best results)
-        (cltd:select-rank *X-indices-matrix* *X-value-vector* ranks
+        (cltd:select-rank *X-tensor* ranks
                           :k k
                           :n-cycle n-cycle
                           :random-state random-state
                           :convergence-threshold 1d-5
                           :convergence-window 10)
-      (format t "Best rank ~A with mean KL ~,6F~%"
+      (format t "Best rank ~A with mean score ~,6F (generalized KL per validation event)~%"
               (cdr (assoc :rank best))
               (cdr (assoc :mean best)))
       (values best results))))
