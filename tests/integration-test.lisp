@@ -350,26 +350,80 @@ scheme got backwards, is that rank 1 scores far worse than rank 3."
 ;;; disjoint index blocks, so the structure is unambiguous. Dense enumeration of
 ;;; the coordinate space happens here only, to sample the tensor.
 ;;;
-;;; What is stable and what is not, measured over 30 seeds of this generator
-;;; (shape (6 5 4), true rank 2, k=5, ranks 1-4, n-cycle 1200):
+;;; What is stable and what is not, measured over 20 seeds of this generator
+;;; (shape (6 5 4), true rank 2, k=5, ranks 1-4, n-cycle 600):
 ;;;
-;;;   select-rank-1se chose rank 2      30/30
-;;;   select-rank (argmin) chose rank 2 27/30
-;;;   (mean[1] - mean[2]) / SE[2]       >= 335 sigma
-;;;   (mean[3] - mean[2]) / mean[2]     <= 5.15%
+;;;   select-rank-1se chose rank 2      20/20
+;;;   select-rank-elbow chose rank 2    20/20
+;;;   select-rank (argmin) chose rank 2 20/20
+;;;   (mean[1] - mean[2]) / SE[2]       >= 266 sigma
+;;;   (mean[3] - mean[2]) / mean[2]     <= 4.42%
 ;;;
-;;; Underfitting is therefore separated by an enormous margin, while past the
-;;; true rank the curve is nearly flat -- which is why the argmin occasionally
-;;; moves and only the 1-SE rule is asserted to land on the true rank.
+;;; Underfitting is separated by an enormous margin, while past the true rank the
+;;; curve is nearly flat. The argmin therefore sits on a plateau where fold noise
+;;; decides, so only the 1-SE rule is asserted to land on the true rank even
+;;; though the argmin happened to agree on every seed measured.
 
-(defun %poisson-draw (rate state)
-  "Draw one Poisson variate with mean RATE (test-only)."
+(defparameter *poisson-chunk-rate* 500d0
+  "Largest rate handed to a single Knuth draw.
+
+Knuth's method walks a product of uniforms down to exp(-rate), and that
+threshold underflows to exactly 0 in double-float once rate passes about 745 --
+past which the loop runs until the product itself underflows and returns roughly
+745 whatever the rate was. Staying well below that keeps the comparison
+meaningful.")
+
+(defun %poisson-chunk (rate state)
+  "Knuth's method, valid only while exp(-RATE) is representable (test-only)."
   (let ((limit (exp (- rate)))
         (k 0)
         (p 1d0))
     (loop (setf p (* p (random 1d0 state)))
           (when (<= p limit) (return k))
           (incf k))))
+
+(defun %poisson-draw (rate state)
+  "Draw one Poisson variate with mean RATE (test-only).
+
+Independent Poisson variates add, so a rate too large for one Knuth draw is
+split into chunks of at most *POISSON-CHUNK-RATE* and the chunk draws summed.
+The result is an exact Poisson(RATE) variate at any rate the generator reaches."
+  (let ((total 0)
+        (remaining (coerce rate 'double-float)))
+    (loop while (plusp remaining)
+          do (let ((chunk (min remaining *poisson-chunk-rate*)))
+               (incf total (%poisson-chunk chunk state))
+               (decf remaining chunk)))
+    total))
+
+(deftest poisson-draw-is-correct-at-large-rates
+  "The generator's sampler must stay correct where exp(-rate) underflows.
+
+Knuth's method walks a product of uniforms down to exp(-rate). That threshold is
+exactly 0 in double-float for rate > 745, so a single-chunk implementation stops
+when the product itself underflows rather than when it crosses the threshold,
+silently clipping every large draw. The generator reaches rate ~1350."
+  (ok (zerop (exp -746d0))
+      "exp(-746) is 0 in double-float, so one Knuth chunk cannot cover that rate")
+  (dolist (rate '(3d0 745d0 1350d0))
+    (let ((state (cltd:%seed-random-state 5150))
+          (draws 500)
+          (total 0)
+          (squared-error 0d0))
+      (dotimes (i draws)
+        (let ((k (%poisson-draw rate state)))
+          (incf total k)
+          (incf squared-error (expt (- k rate) 2))))
+      (let ((mean (/ (coerce total 'double-float) draws))
+            (standard-error (sqrt (/ rate draws))))
+        (ok (< (abs (- mean rate)) (* 5d0 standard-error))
+            (format nil "rate ~,0F: sample mean ~,2F is within 5 SE (~,2F)"
+                    rate mean (* 5d0 standard-error)))
+        ;; A Poisson variate has variance equal to its mean; clipping collapses
+        ;; the draws onto a constant and blows this up instead.
+        (ok (< (abs (- (/ squared-error draws) rate)) (* 0.5d0 rate))
+            (format nil "rate ~,0F: mean squared error ~,1F tracks the rate"
+                    rate (/ squared-error draws)))))))
 
 (defun %block-factor (dim rank state)
   "Factor matrix whose RANK columns sit on disjoint index blocks (test-only)."
@@ -439,8 +493,8 @@ scheme got backwards, is that rank 1 scores far worse than rank 3."
                             :k 5
                             :n-cycle 1200
                             :random-state (cltd:%seed-random-state (+ 700 seed)))
-        ;; The plateau past the true rank makes the argmin noise-driven (27/30
-        ;; seeds landed on 2), so only the underfitting side is asserted here.
+        ;; The plateau past the true rank leaves the argmin to fold noise, so
+        ;; only the underfitting side is asserted here.
         (ok (>= (cdr (assoc :rank best)) 2)
             (format nil "seed ~D: argmin never underfits (got ~D)"
                     seed (cdr (assoc :rank best))))))))
@@ -458,12 +512,12 @@ scheme got backwards, is that rank 1 scores far worse than rank 3."
     (let ((m1 (funcall mean 1))
           (m2 (funcall mean 2))
           (m3 (funcall mean 3)))
-      ;; Measured at >= 335 standard errors over 30 seeds; 50 keeps room to spare.
+      ;; Measured at >= 266 standard errors over 20 seeds; 50 keeps room to spare.
       (ok (> (- m1 m2) (* 50d0 se2))
           (format nil "rank 1 underfits by ~,0F standard errors" (/ (- m1 m2) se2)))
       (ok (> (/ (- m1 m2) m2) 5d0)
           (format nil "dropping to the true rank improves the score ~,1Fx" (/ m1 m2)))
-      ;; Past the true rank the curve is flat: at most 5.15% over 30 seeds.
+      ;; Past the true rank the curve is flat: at most 4.42% over 20 seeds.
       (ok (< (/ (abs (- m3 m2)) m2) 0.5d0)
           (format nil "rank 3 changes the score by only ~,2F%" (* 100 (/ (- m3 m2) m2)))))))
 
