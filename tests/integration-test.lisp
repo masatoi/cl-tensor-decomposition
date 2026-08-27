@@ -342,3 +342,127 @@ scheme got backwards, is that rank 1 scores far worse than rank 3."
                     seed (cdr (assoc :rank best))))
         (ok (equal (mapcar (lambda (r) (cdr (assoc :rank r))) results) '(1 2 3 4))
             (format nil "seed ~D leaves the result list in input order" seed))))))
+
+;;; ==========================================================================
+;;; Rank selection on synthetic data with a known true rank
+;;; ==========================================================================
+;;; Counts are drawn from a CP model of exactly TRUE-RANK whose components sit on
+;;; disjoint index blocks, so the structure is unambiguous. Dense enumeration of
+;;; the coordinate space happens here only, to sample the tensor.
+;;;
+;;; What is stable and what is not, measured over 30 seeds of this generator
+;;; (shape (6 5 4), true rank 2, k=5, ranks 1-4, n-cycle 1200):
+;;;
+;;;   select-rank-1se chose rank 2      30/30
+;;;   select-rank (argmin) chose rank 2 27/30
+;;;   (mean[1] - mean[2]) / SE[2]       >= 335 sigma
+;;;   (mean[3] - mean[2]) / mean[2]     <= 5.15%
+;;;
+;;; Underfitting is therefore separated by an enormous margin, while past the
+;;; true rank the curve is nearly flat -- which is why the argmin occasionally
+;;; moves and only the 1-SE rule is asserted to land on the true rank.
+
+(defun %poisson-draw (rate state)
+  "Draw one Poisson variate with mean RATE (test-only)."
+  (let ((limit (exp (- rate)))
+        (k 0)
+        (p 1d0))
+    (loop (setf p (* p (random 1d0 state)))
+          (when (<= p limit) (return k))
+          (incf k))))
+
+(defun %block-factor (dim rank state)
+  "Factor matrix whose RANK columns sit on disjoint index blocks (test-only)."
+  (let ((matrix (make-array (list dim rank) :element-type 'double-float)))
+    (loop for i from 0 below dim
+          do (loop for r from 0 below rank
+                   do (setf (aref matrix i r)
+                            (if (= (mod i rank) r)
+                                (+ 0.5d0 (random 1d0 state))
+                                (* 0.02d0 (+ 0.5d0 (random 1d0 state)))))))
+    matrix))
+
+(defun %coordinate-space (shape)
+  "Every coordinate of SHAPE as a list of index lists (test-only)."
+  (if (null shape)
+      (list '())
+      (loop for i from 0 below (car shape)
+            append (loop for rest in (%coordinate-space (cdr shape))
+                         collect (cons i rest)))))
+
+(defun make-known-rank-tensor (shape true-rank scale seed)
+  "Poisson counts drawn from a CP model of exactly TRUE-RANK (test-only)."
+  (let* ((state (cltd:%seed-random-state seed))
+         (factors (make-array (length shape) :initial-contents
+                              (loop for dim in shape
+                                    collect (%block-factor dim true-rank state))))
+         (rows '()))
+    (dolist (coordinate (%coordinate-space shape))
+      (let* ((rate (* scale
+                      (loop for r from 0 below true-rank
+                            sum (let ((product 1d0))
+                                  (loop for mode from 0 below (length shape)
+                                        do (setf product
+                                                 (* product
+                                                    (aref (svref factors mode)
+                                                          (nth mode coordinate) r))))
+                                  product)
+                            double-float)))
+             (count (%poisson-draw rate state)))
+        (when (plusp count)
+          (push (cons coordinate count) rows))))
+    (setf rows (nreverse rows))
+    (let ((indices (make-array (list (length rows) (length shape)) :element-type 'fixnum))
+          (values (make-array (length rows) :element-type 'double-float)))
+      (loop for (coordinate . count) in rows
+            for row from 0
+            do (loop for mode from 0 below (length shape)
+                     do (setf (aref indices row mode) (nth mode coordinate)))
+               (setf (aref values row) (coerce count 'double-float)))
+      (cltd:make-sparse-tensor shape indices values))))
+
+(deftest integration-one-se-rule-recovers-the-true-rank
+  "On data generated at a known rank, the 1-SE rule selects that rank."
+  (dolist (seed '(101 202))
+    (let ((tensor (make-known-rank-tensor '(6 5 4) 2 400d0 seed)))
+      (multiple-value-bind (selected results)
+          (cltd:select-rank-1se tensor '(1 2 3 4)
+                                :k 5
+                                :n-cycle 1200
+                                :random-state (cltd:%seed-random-state (+ 700 seed)))
+        (ok (= (length results) 4) "One result per candidate rank")
+        (ok (= (cdr (assoc :rank selected)) 2)
+            (format nil "seed ~D: 1-SE rule recovers the true rank 2 (got ~D)"
+                    seed (cdr (assoc :rank selected)))))
+      (multiple-value-bind (best)
+          (cltd:select-rank tensor '(1 2 3 4)
+                            :k 5
+                            :n-cycle 1200
+                            :random-state (cltd:%seed-random-state (+ 700 seed)))
+        ;; The plateau past the true rank makes the argmin noise-driven (27/30
+        ;; seeds landed on 2), so only the underfitting side is asserted here.
+        (ok (>= (cdr (assoc :rank best)) 2)
+            (format nil "seed ~D: argmin never underfits (got ~D)"
+                    seed (cdr (assoc :rank best))))))))
+
+(deftest integration-true-rank-shows-an-elbow
+  "The curve drops sharply up to the true rank and then flattens."
+  (let* ((tensor (make-known-rank-tensor '(6 5 4) 2 400d0 303))
+         (results (cltd:cross-validate-rank tensor '(1 2 3 4)
+                                            :k 5
+                                            :n-cycle 1200
+                                            :random-state (cltd:%seed-random-state 1003)))
+         (mean (lambda (rank)
+                 (cdr (assoc :mean (%result-for results rank)))))
+         (se2 (cdr (assoc :standard-error (%result-for results 2)))))
+    (let ((m1 (funcall mean 1))
+          (m2 (funcall mean 2))
+          (m3 (funcall mean 3)))
+      ;; Measured at >= 335 standard errors over 30 seeds; 50 keeps room to spare.
+      (ok (> (- m1 m2) (* 50d0 se2))
+          (format nil "rank 1 underfits by ~,0F standard errors" (/ (- m1 m2) se2)))
+      (ok (> (/ (- m1 m2) m2) 5d0)
+          (format nil "dropping to the true rank improves the score ~,1Fx" (/ m1 m2)))
+      ;; Past the true rank the curve is flat: at most 5.15% over 30 seeds.
+      (ok (< (/ (abs (- m3 m2)) m2) 0.5d0)
+          (format nil "rank 3 changes the score by only ~,2F%" (* 100 (/ (- m3 m2) m2)))))))
