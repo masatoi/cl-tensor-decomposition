@@ -366,12 +366,21 @@ produces the bad value instead of trapping on it, which is what lets the library
 report where it came from rather than surfacing an implementation condition.
 
 Aggregates get their own check, because entries that are each finite can still
-sum or multiply past the double range: a column sum, a component weight, or the
-KKT residual itself. Each signals `numerical-instability-error` naming what
+sum or multiply past the double range: a column sum, a component weight, the KKT
+residual, or the loss. Each signals `numerical-instability-error` naming what
 overflowed, rather than dividing by an infinity and sending zeros and NaNs on
 into the reconstruction. The residual is computed after the loop but under the
 same trap mask, since it divides observed counts by the reconstruction and can
-overflow on exactly the inputs the sweep can. A component whose weight collapses is different —
+overflow on exactly the inputs the sweep can.
+
+The loss needs its own check even though everything feeding it is checked: it is
+the sum of the local term and the total predicted mass, and those can overflow to
+opposite infinities while every factor entry, every reconstruction and the KKT
+residual stay finite. Their sum is then a NaN — which also poisons every
+comparison it enters, so an unusable fit could otherwise be picked by `:n-starts`
+and returned as the answer. `:n-starts` does not rescue this: a loss that cannot
+be represented reflects data whose model mass overflows, and a different
+initialization does not change that. A component whose weight collapses is different —
 it usually just means the rank is larger than the data supports, which is what a
 rank sweep is looking for — so `:on-dead-component` chooses `:warn` (default),
 `:error`, or `:ignore`.

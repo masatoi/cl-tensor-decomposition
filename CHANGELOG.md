@@ -65,9 +65,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   the loss carry it further; on SBCL the IEEE traps are masked across the
   iteration so the library reports the offending entry instead of an
   implementation floating-point condition. Aggregates are checked separately: a
-  column sum, a component weight or the KKT residual can overflow while every
-  entry feeding it is finite, so those signal too rather than being divided by or
-  returned. The residual is computed after the loop but under the same trap mask,
+  column sum, a component weight, the KKT residual or the loss can overflow while
+  every entry feeding it is finite, so those signal too rather than being divided
+  by or returned. The loss is the sum of the local term and the total predicted
+  mass, which can overflow to opposite infinities and give a NaN that nothing
+  else on the path can see — and that a NaN loses no comparison, so `:n-starts`
+  could otherwise select it. The residual is computed after the loop but under the same trap mask,
   since it divides observed counts by the reconstruction.
   `:on-dead-component` handles a component whose weight collapses — `:warn`
   (default), `:error`, or `:ignore`. It defaults to warning rather than erroring

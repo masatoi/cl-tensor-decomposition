@@ -3477,3 +3477,57 @@ instead of the library's own."
      (ok (cltd:%float-infinity-p
           (cltd::%kkt-residual indices values x-hat factors numerator denominator))
          "The residual really does overflow for this input, so the guard has work to do"))))
+
+(defparameter overflow-tensor
+  (cltd:make-sparse-tensor
+   '(2)
+   (make-array '(2 1) :element-type 'fixnum :initial-contents '((0) (1)))
+   (make-array 2 :element-type 'double-float :initial-contents '(1d308 1d308)))
+  "Counts that are individually finite but whose model mass cannot be represented.")
+
+(deftest sparse-kl-divergence-can-go-non-finite-with-finite-parts
+  "The loss needs its own check: nothing else on the path shows the failure.
+
+Each factor entry is finite, each reconstruction is finite, and the KKT residual
+is small. Only the two aggregates inside the loss overflow -- the local term to
+negative infinity, the total predicted mass to positive infinity -- and their sum
+is a NaN."
+  (cltd::%with-float-traps-masked
+   (let ((factors (make-array 1 :initial-contents
+                              (list (make-array '(2 4) :element-type 'double-float
+                                                       :initial-element 4.4d307))))
+         (indices (cltd:sparse-tensor-indices overflow-tensor))
+         (values (cltd:sparse-tensor-values overflow-tensor))
+         (x-hat (make-array 2 :element-type 'double-float :initial-element 0d0))
+         (numerator (make-array 1 :initial-contents
+                                (list (make-array '(2 4) :element-type 'double-float
+                                                         :initial-element 0d0))))
+         (denominator (make-array '(1 4) :element-type 'double-float
+                                         :initial-element 1d0)))
+     (cltd:sdot factors indices x-hat)
+     (ok (null (cltd::%check-factor-values factors))
+         "Every factor entry is finite, so the entry scan passes")
+     (ok (every (lambda (v) (not (cltd:%float-infinity-p v))) x-hat)
+         "Every reconstruction is finite, so nothing shows up there either")
+     (let ((residual (cltd::%kkt-residual indices values x-hat factors
+                                          numerator denominator)))
+       (ok (and (not (cltd:%float-nan-p residual))
+                (not (cltd:%float-infinity-p residual)))
+           (format nil "The KKT residual is finite (~,4F), so it cannot catch this"
+                   residual)))
+     (ok (cltd:%float-nan-p (cltd:sparse-kl-divergence indices values x-hat factors))
+         "Yet the loss itself is a NaN"))))
+
+(deftest decomposition-rejects-a-non-finite-loss
+  "A loss that is not finite must be reported, not returned or compared against."
+  (dolist (n-starts '(1 4))
+    (ok (handler-case
+            (let ((*random-state* (cltd:%seed-random-state 3)))
+              (nth-value 2 (cltd:decomposition overflow-tensor
+                                               :r 4 :n-cycle 1 :n-starts n-starts
+                                               :on-dead-component :ignore))
+              ;; Returning at all is the failure this guards against.
+              nil)
+          (cltd:numerical-instability-error () t)
+          (error () nil))
+        (format nil ":n-starts ~D signals rather than returning a NaN loss" n-starts))))

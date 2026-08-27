@@ -567,6 +567,23 @@ overshoots slightly on the iteration that revives it and settles on the next."
                         prod)
                   double-float)))))
 
+(defun %check-loss (kl-value)
+  "Signal NUMERICAL-INSTABILITY-ERROR unless KL-VALUE is a finite loss.
+
+The loss is a sum of two aggregates -- the local term over the stored non-zeros
+and the total predicted mass -- and either can leave the double range while every
+factor entry, every reconstruction and the KKT residual stay finite. Their sum is
+then a NaN that nothing else on the path can see, so it needs its own check.
+
+A NaN also poisons every comparison it takes part in, which is how an unusable
+fit could otherwise be selected by :N-STARTS and returned as the answer."
+  (when (or (%float-nan-p kl-value) (%float-infinity-p kl-value))
+    (error 'numerical-instability-error
+           :location :kl-divergence
+           :value kl-value
+           :operation "KL divergence"))
+  kl-value)
+
 (defun %kkt-residual (x-indices-matrix x-value-vector x^-value-vector
                       factor-matrix-vector numerator-tmp denominator-tmp)
   "Largest KKT violation of the current model, measured without changing it.
@@ -804,7 +821,12 @@ Returns six values:
   3. Vector of KL divergence values, one per outer iteration
   4. T when either convergence test fired
   5. The lambda vector of component weights
-  6. The final KKT residual, recomputed against the model being returned"
+  6. The final KKT residual, recomputed against the model being returned
+
+Signals NUMERICAL-INSTABILITY-ERROR if the loss, the KKT residual, a factor
+entry or a normalization aggregate leaves the double range. :N-STARTS does not
+paper over this: a loss that cannot be represented reflects data whose model mass
+overflows, which a different initialization does not change."
   (unless (and (integerp n-cycle) (>= n-cycle 0))
     (error 'invalid-input-error
            :reason :invalid-iteration-budget
@@ -873,8 +895,9 @@ Returns six values:
         (%normalize-factors factor-matrix-vector lambda-vector)
         (%absorb-lambda factor-matrix-vector lambda-vector)
         (sdot factor-matrix-vector X-indices-matrix X^-value-vector)
-        (let ((kl-value (sparse-kl-divergence X-indices-matrix X-value-vector
-                                              X^-value-vector factor-matrix-vector)))
+        (let ((kl-value (%check-loss
+                         (sparse-kl-divergence X-indices-matrix X-value-vector
+                                               X^-value-vector factor-matrix-vector))))
           (vector-push-extend kl-value kl-history)
           (setf final-kl kl-value)
           (when verbose
@@ -916,8 +939,9 @@ Returns six values:
        (%normalize-factors factor-matrix-vector lambda-vector)
        (%absorb-lambda factor-matrix-vector lambda-vector)
        (sdot factor-matrix-vector X-indices-matrix X^-value-vector)
-       (setf final-kl (sparse-kl-divergence X-indices-matrix X-value-vector
-                                            X^-value-vector factor-matrix-vector)))
+       (setf final-kl (%check-loss
+                       (sparse-kl-divergence X-indices-matrix X-value-vector
+                                             X^-value-vector factor-matrix-vector))))
      ;; The settled residual runs CALC-NUMERATOR, which divides an observed count
      ;; by the reconstruction, so it can overflow on the same inputs the sweep
      ;; can. It stays inside the mask for the same reason the sweep does: the
