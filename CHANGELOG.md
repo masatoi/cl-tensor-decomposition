@@ -10,7 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **`:n-cycle` counts outer iterations**: one cycle is now a full sweep over all
   modes rather than a single mode update, so the same number does as much work as
-  there are modes. A `:n-cycle 100` on a 3-mode tensor is 300 mode updates.
+  there are modes. A `:n-cycle 100` on a 3-mode tensor is 300 mode updates. It
+  must be a non-negative integer; `0` runs no updates but still returns the
+  initial model normalized, with real weights and a real loss, rather than raw
+  factors and a weight vector of all ones.
 
   Counting a single mode as an iteration made `:n-cycle` mean different amounts
   of work for tensors of different order, and made the convergence window compare

@@ -302,7 +302,9 @@ sparse only in storage.
 One `:n-cycle` is a **full sweep**: every mode is updated once, with the
 reconstruction refreshed between modes. It used to count single-mode updates, so
 the same number now does as much work as there are modes — a `:n-cycle 100` on a
-3-mode tensor is 300 mode updates, not 100.
+3-mode tensor is 300 mode updates, not 100. It must be a non-negative integer;
+`0` runs no updates but still returns the initial model in the representation
+described below, with normalized columns, real weights and a real loss.
 
 **Convergence** is decided by the KKT residual, not only by the loss curve. At a
 solution of the non-negativity constrained problem every factor entry satisfies

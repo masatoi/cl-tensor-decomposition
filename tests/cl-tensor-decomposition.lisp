@@ -3344,3 +3344,42 @@ first."
               (cltd:numerical-instability-error () t)
               (error () nil))
             "An overflow produced during the sweep does not escape as a float condition")))))
+
+(deftest decomposition-honours-its-contract-with-a-zero-budget
+  "A zero iteration budget still returns the documented representation.
+
+The loop body is what normalizes the columns, fills in the weights and computes
+the loss, so a budget of zero used to hand back raw random factors with a weight
+vector of all ones and a final KL of 0."
+  (let ((*random-state* (cltd:%seed-random-state 61))
+        (rank 3))
+    (multiple-value-bind (factors iterations final-kl kl-history converged-p lambda residual)
+        (cltd:decomposition X-tensor :r rank :n-cycle 0 :on-dead-component :ignore)
+      (ok (zerop iterations) "No iterations were executed")
+      (ok (zerop (length kl-history)) "History has one entry per iteration, so none")
+      (ok (not converged-p) "A zero budget does not report convergence")
+      (ok (>= residual 0d0) "The residual is still measured")
+      (ok (< (abs (- (reduce #'+ lambda) (cltd::%cp-total-mass factors))) 1d-8)
+          (format nil "sum(lambda) ~,8F equals the total predicted mass ~,8F"
+                  (reduce #'+ lambda) (cltd::%cp-total-mass factors)))
+      (loop for mode from 1 below (length factors)
+            do (let ((m (svref factors mode)))
+                 (dotimes (ri rank)
+                   (let ((column-sum (loop for i from 0 below (array-dimension m 0)
+                                           sum (aref m i ri))))
+                     (ok (< (abs (- column-sum 1d0)) 1d-8)
+                         (format nil "mode ~D column ~D sums to 1 (~,8F)"
+                                 mode ri column-sum))))))
+      (let ((x-hat (make-array (length X-value-vector) :element-type 'double-float
+                                                       :initial-element 0d0)))
+        (cltd:sdot factors X-indices-matrix x-hat)
+        (ok (< (abs (- final-kl (cltd:sparse-kl-divergence X-indices-matrix X-value-vector
+                                                           x-hat factors)))
+               1d-9)
+            (format nil "final-kl ~,6F is the loss of the returned factors" final-kl))))))
+
+(deftest decomposition-rejects-a-nonsensical-iteration-budget
+  (dolist (n-cycle '(-1 2.5 :many))
+    (ok (handler-case (progn (cltd:decomposition X-tensor :r 2 :n-cycle n-cycle) nil)
+          (cltd:invalid-input-error () t))
+        (format nil ":n-cycle ~S is rejected" n-cycle))))

@@ -767,6 +767,10 @@ the first sweep runs without it, matching Chi and Kolda.
 DEAD-COMPONENT-THRESHOLD and ON-DEAD-COMPONENT are passed to
 %CHECK-FACTOR-HEALTH once the sweep ends.
 
+N-CYCLE of 0 is legal and runs no updates, but the initial model is still put
+into the returned representation: columns normalized, weights filled in and the
+loss computed against them.
+
 Returns six values:
   1. Number of outer iterations executed
   2. Final KL divergence value
@@ -774,6 +778,10 @@ Returns six values:
   4. T when either convergence test fired
   5. The lambda vector of component weights
   6. The final KKT residual, recomputed against the model being returned"
+  (unless (and (integerp n-cycle) (>= n-cycle 0))
+    (error 'invalid-input-error
+           :reason :invalid-iteration-budget
+           :details (format nil "n-cycle must be a non-negative integer, got ~S" n-cycle)))
   (let* ((n-modes (length factor-matrix-vector))
          (rank (array-dimension (svref factor-matrix-vector 0) 1))
          ;; UPDATE declares these double-float under (safety 0), so a caller's
@@ -872,7 +880,17 @@ Returns six values:
                     (when (< ratio threshold)
                       (setf converged-p t)
                       (return-from done))))
-                (setf last-smooth smooth))))))))
+                (setf last-smooth smooth)))))))
+     ;; An empty budget never reaches the loop body, and the loop body is what
+     ;; normalizes the columns, fills in the weights and computes the loss. Do it
+     ;; once here so a caller gets the documented representation either way,
+     ;; rather than raw initial factors with a weight vector of all ones.
+     (when (zerop iterations)
+       (%normalize-factors factor-matrix-vector lambda-vector)
+       (%absorb-lambda factor-matrix-vector lambda-vector)
+       (sdot factor-matrix-vector X-indices-matrix X^-value-vector)
+       (setf final-kl (sparse-kl-divergence X-indices-matrix X-value-vector
+                                            X^-value-vector factor-matrix-vector))))
     (unless residual-fresh
       (setf residual (%kkt-residual X-indices-matrix X-value-vector X^-value-vector
                                     factor-matrix-vector numerator-tmp denominator-tmp))
@@ -931,7 +949,9 @@ AUX     - Optional auxiliary data (e.g., preprocessing metadata, hash tables)"
 TENSOR        - sparse-tensor structure containing shape, indices, and values.
 N-CYCLE       - maximum *outer iterations*; defaults to 100. One outer iteration
                 updates every mode once. This used to count single-mode updates,
-                so the same number now does N-MODES times as much work.
+                so the same number now does N-MODES times as much work. Must be a
+                non-negative integer; 0 runs no updates but still returns the
+                initial model in the normalized representation below.
 R             - latent rank shared across factor matrices; defaults to 20.
 VERBOSE       - when true, emit per-iteration logs; defaults to NIL.
 CONVERGENCE-THRESHOLD - optional relative tolerance for the moving-average test.
@@ -965,6 +985,10 @@ NUMERICAL-INSTABILITY-ERROR if the fit produces NaN or infinite factors."
     (error 'invalid-input-error
            :reason :invalid-n-starts
            :details (format nil "n-starts must be a positive integer, got ~S" n-starts)))
+  (unless (and (integerp n-cycle) (>= n-cycle 0))
+    (error 'invalid-input-error
+           :reason :invalid-iteration-budget
+           :details (format nil "n-cycle must be a non-negative integer, got ~S" n-cycle)))
   (setf kappa (coerce kappa 'double-float))
   (setf kappa-tolerance (coerce kappa-tolerance 'double-float))
   (let* ((x-shape (sparse-tensor-shape tensor))
