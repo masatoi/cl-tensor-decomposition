@@ -183,11 +183,12 @@ evaluating 25–62 % fewer ranks:
 | Palmer Penguins | — | 3 | 3 | 3 | 33 % |
 
 Two things to know. The second return value covers only the ranks the sweep
-reached, unlike `select-rank` and `select-rank-1se` which always return the whole
-grid. And the rule is greedy: it assumes the curve falls to an elbow and then
-flattens, so a curve that plateaus and improves again much later would be cut
-short — raise `:patience`, or use `cross-validate-rank` when the whole curve
-matters.
+reached — unlike `select-rank` and `select-rank-1se`, which always return the
+whole grid — and it carries no repeats, since duplicate candidates are collapsed
+before the sweep. And the rule is greedy: it assumes the curve falls to an elbow
+and then flattens, so a curve that plateaus and improves again much later would
+be cut short — raise `:patience`, or use `cross-validate-rank` when the whole
+curve matters.
 
 ### How the folds are built
 

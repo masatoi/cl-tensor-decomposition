@@ -540,8 +540,8 @@ returns for the same TENSOR, K and RANDOM-STATE.
 
 TENSOR, K, N-CYCLE, CONVERGENCE-THRESHOLD, CONVERGENCE-WINDOW,
 EVALUATION-FUNCTION, RANDOM-STATE and VERBOSE behave as in CROSS-VALIDATE-RANK.
-RANKS may be in any order; a sorted copy is used and the caller's list is left
-alone.
+RANKS may be in any order and may repeat; a sorted, deduplicated copy is used
+and the caller's list is left alone.
 TOLERANCE - how many standard errors an improvement must clear to count;
             defaults to 1. Larger values stop sooner.
 PATIENCE  - how many consecutive unpaid ranks to allow before stopping;
@@ -557,7 +557,8 @@ Returns two values:
   2. The results for the ranks that were actually evaluated, in ascending order
 
 Unlike SELECT-RANK and SELECT-RANK-1SE, the second value covers only the ranks
-the sweep reached, not the whole candidate list -- that is the point.
+the sweep reached, not the whole candidate list -- that is the point. It also
+carries no repeats, whatever RANKS contained.
 
 Signals INVALID-INPUT-ERROR for invalid ranks, a negative TOLERANCE, a PATIENCE
 below 1, or the same tensor and K problems CROSS-VALIDATE-RANK reports."
@@ -573,7 +574,10 @@ below 1, or the same tensor and K problems CROSS-VALIDATE-RANK reports."
            :details (format nil "patience must be a positive integer, got ~S"
                             patience)))
   (let ((plan (%make-cv-plan tensor k random-state))
-        (ascending (sort (copy-list ranks) (function <)))
+        ;; Duplicates are collapsed: the same rank scored twice against the same
+        ;; folds gives the same mean, so the second copy would look like a rank
+        ;; that failed to pay and stop the sweep before reaching the rest.
+        (ascending (remove-duplicates (sort (copy-list ranks) (function <))))
         (threshold (coerce tolerance 'double-float))
         (evaluated '())
         (best nil)

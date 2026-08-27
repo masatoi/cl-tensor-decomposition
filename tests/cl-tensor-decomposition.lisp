@@ -2948,6 +2948,27 @@ always, and fold sizes keep the spread a multinomial draw has."
                     patience (length evaluated) previous))
         (setf previous (length evaluated))))))
 
+(deftest select-rank-elbow-ignores-duplicate-ranks
+  "A repeated candidate must not read as a rank that failed to pay.
+
+Scoring the same rank twice against the same folds yields the same mean, so the
+gain is zero; with the default :patience 1 the sweep would otherwise stop on the
+duplicate without ever reaching the larger candidates."
+  (let ((seed 41))
+    (flet ((sweep (ranks)
+             (multiple-value-bind (best evaluated)
+                 (cltd:select-rank-elbow CV-tensor ranks
+                                         :k 3 :n-cycle 20
+                                         :random-state (cltd:%seed-random-state seed))
+               (list (cdr (assoc :rank best))
+                     (mapcar (lambda (r) (cdr (assoc :rank r))) evaluated)))))
+      (ok (equal (sweep '(1 1 2)) (sweep '(1 2)))
+          (format nil "(1 1 2) behaves as (1 2): ~A" (sweep '(1 1 2))))
+      (ok (equal (second (sweep '(1 1 2))) '(1 2))
+          "The duplicate does not cut the sweep short")
+      (ok (equal (sweep '(3 1 2 1 3)) (sweep '(1 2 3)))
+          (format nil "(3 1 2 1 3) behaves as (1 2 3): ~A" (sweep '(3 1 2 1 3)))))))
+
 (deftest select-rank-elbow-does-not-mutate-the-rank-list
   "Sorting the candidates must not touch the caller's list."
   (let* ((ranks (list 3 1 2))
