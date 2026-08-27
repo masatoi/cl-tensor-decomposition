@@ -3219,3 +3219,70 @@ supports is exactly the answer being looked for."
                 (cltd::%check-factor-health
                  factors (make-array 3 :element-type 'double-float :initial-element 1d0))))
         "Live components report nothing")))
+
+(deftest decomposition-kkt-residual-describes-the-returned-model
+  "The reported residual must belong to the factors that come back.
+
+Each mode's residual is measured before that mode is updated, so the value
+observed during a sweep mixes staggered pre-update states and can be orders of
+magnitude away from the residual of the completed, normalized model."
+  (let ((*random-state* (cltd:%seed-random-state 9)))
+    (multiple-value-bind (factors iterations final-kl kl-history converged-p lambda residual)
+        ;; A zero tolerance exhausts the budget, the case where a stale in-sweep
+        ;; value drifts furthest from the returned model.
+        (cltd:decomposition X-tensor :r 2 :n-cycle 3 :kkt-tolerance 0d0
+                                     :on-dead-component :ignore)
+      (declare (ignore iterations final-kl kl-history converged-p lambda))
+      (multiple-value-bind (numerator denominator) (%make-workspace '(2 3 4) 2)
+        (let ((x-hat (make-array (length X-value-vector) :element-type 'double-float
+                                                         :initial-element 0d0)))
+          (cltd:sdot factors X-indices-matrix x-hat)
+          (let ((recomputed (cltd::%kkt-residual X-indices-matrix X-value-vector x-hat
+                                                 factors numerator denominator)))
+            (ok (< (abs (- residual recomputed)) 1d-9)
+                (format nil "Reported residual ~,6E matches the returned model's ~,6E"
+                        residual recomputed))))))))
+
+(deftest decomposition-converges-on-the-completed-model
+  "Convergence is confirmed against the finished sweep, not the in-sweep screen."
+  (let ((*random-state* (cltd:%seed-random-state 9)))
+    (multiple-value-bind (factors iterations final-kl kl-history converged-p lambda residual)
+        (cltd:decomposition X-tensor :r 2 :n-cycle 200 :kkt-tolerance 1d-4
+                                     :on-dead-component :ignore)
+      (declare (ignore iterations final-kl kl-history lambda))
+      (when converged-p
+        (ok (< residual 1d-4)
+            (format nil "Reported residual ~,6E is below the tolerance it stopped on"
+                    residual))
+        (multiple-value-bind (numerator denominator) (%make-workspace '(2 3 4) 2)
+          (let ((x-hat (make-array (length X-value-vector) :element-type 'double-float
+                                                           :initial-element 0d0)))
+            (cltd:sdot factors X-indices-matrix x-hat)
+            (ok (< (cltd::%kkt-residual X-indices-matrix X-value-vector x-hat
+                                        factors numerator denominator)
+                   1d-4)
+                "The returned model really satisfies the tolerance")))))))
+
+(deftest decomposition-accepts-ordinary-numbers-for-kappa
+  "KAPPA and KAPPA-TOLERANCE are coerced at the public boundary.
+
+UPDATE declares them double-float and compiles with (safety 0), so a plain 0 or
+a single-float from a caller must not reach it undeclared."
+  (dolist (kappa (list 0 1/100 0.01 0.01d0))
+    (ok (handler-case
+            (let ((*random-state* (cltd:%seed-random-state 9)))
+              (nth-value 2 (cltd:decomposition X-tensor :r 2 :n-cycle 5
+                                                        :kappa kappa
+                                                        :on-dead-component :ignore))
+              t)
+          (error () nil))
+        (format nil "kappa ~S (~A) is accepted" kappa (type-of kappa))))
+  (dolist (tolerance (list 0 1/1000000 1e-10 1d-10))
+    (ok (handler-case
+            (let ((*random-state* (cltd:%seed-random-state 9)))
+              (nth-value 2 (cltd:decomposition X-tensor :r 2 :n-cycle 5
+                                                        :kappa-tolerance tolerance
+                                                        :on-dead-component :ignore))
+              t)
+          (error () nil))
+        (format nil "kappa-tolerance ~S (~A) is accepted" tolerance (type-of tolerance)))))

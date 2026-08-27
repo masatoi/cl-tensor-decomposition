@@ -567,6 +567,45 @@ overshoots slightly on the iteration that revives it and settles on the next."
                         prod)
                   double-float)))))
 
+(defun %kkt-residual (x-indices-matrix x-value-vector x^-value-vector
+                      factor-matrix-vector numerator-tmp denominator-tmp)
+  "Largest KKT violation of the current model, measured without changing it.
+
+UPDATE reports the residual it sees on entry, which is cheap because it already
+has the numerator and denominator, but that value belongs to the point the mode
+started from. Once a sweep has updated every mode and normalized the columns,
+those per-mode values describe states that no longer exist. This recomputes the
+residual against one settled model, which is what a reported or asserted
+residual has to mean.
+
+X^-VALUE-VECTOR must already match FACTOR-MATRIX-VECTOR; call SDOT first.
+Costs one numerator pass per mode, the same as a sweep's dominant term, so it is
+used at the end of a run and to confirm a candidate convergence rather than
+every iteration."
+  (declare (optimize (speed 3) (safety 0))
+           (type (simple-array fixnum) x-indices-matrix)
+           (type (simple-array double-float) x-value-vector x^-value-vector denominator-tmp))
+  (let ((residual 0.0d0))
+    (declare (type double-float residual))
+    (loop for mode fixnum from 0 below (length factor-matrix-vector)
+          do (initialize-matrix (svref numerator-tmp mode) 0.0d0)
+             (initialize-matrix denominator-tmp 1.0d0)
+             (calc-denominator factor-matrix-vector mode denominator-tmp)
+             (calc-numerator x-indices-matrix x-value-vector x^-value-vector
+                             factor-matrix-vector mode numerator-tmp)
+             (let ((factor-matrix (svref factor-matrix-vector mode))
+                   (numerator-tmp-elem (svref numerator-tmp mode)))
+               (declare (type (simple-array double-float)
+                              factor-matrix numerator-tmp-elem))
+               (loop for i from 0 below (array-dimension factor-matrix 0)
+                     do (loop for ri from 0 below (array-dimension factor-matrix 1)
+                              do (setf residual
+                                       (max residual
+                                            (abs (min (aref factor-matrix i ri)
+                                                      (- (aref denominator-tmp mode ri)
+                                                         (aref numerator-tmp-elem i ri))))))))))
+    residual))
+
 (defun %copy-factor-matrices (factor-matrix-vector)
   "Return a fresh deep copy of FACTOR-MATRIX-VECTOR."
   (make-array (length factor-matrix-vector) :initial-contents
@@ -711,9 +750,13 @@ Returns six values:
   3. Vector of KL divergence values, one per outer iteration
   4. T when either convergence test fired
   5. The lambda vector of component weights
-  6. The final KKT residual"
+  6. The final KKT residual, recomputed against the model being returned"
   (let* ((n-modes (length factor-matrix-vector))
          (rank (array-dimension (svref factor-matrix-vector 0) 1))
+         ;; UPDATE declares these double-float under (safety 0), so a caller's
+         ;; plain 0 or single-float must be converted before it gets there.
+         (kappa (coerce kappa 'double-float))
+         (kappa-tolerance (coerce kappa-tolerance 'double-float))
          (lambda-vector (or lambda-vector
                             (make-array rank :element-type 'double-float
                                              :initial-element 1.0d0)))
@@ -734,6 +777,8 @@ Returns six values:
                                  :initial-element 0d0 :adjustable t :fill-pointer 0))
          (final-kl 0d0)
          (residual 0d0)
+         (sweep-residual 0d0)
+         (residual-fresh nil)
          (iterations 0)
          (converged-p nil))
     (block done
@@ -743,10 +788,14 @@ Returns six values:
       (sdot factor-matrix-vector X-indices-matrix X^-value-vector)
       (loop for iteration from 0 below n-cycle do
         (setf iterations (1+ iteration))
-        (setf residual 0d0)
+        ;; Cheap screen: the largest violation any mode reported on entry. It
+        ;; costs nothing because UPDATE already has the gradients, but it
+        ;; describes staggered pre-update states, so it only gates the exact
+        ;; check below rather than deciding anything itself.
+        (setf sweep-residual 0d0)
         (loop for mode from 0 below n-modes
-              do (setf residual
-                       (max residual
+              do (setf sweep-residual
+                       (max sweep-residual
                             (update X-indices-matrix X-value-vector X^-value-vector
                                     factor-matrix-vector mode
                                     numerator-tmp denominator-tmp
@@ -764,10 +813,18 @@ Returns six values:
           (setf final-kl kl-value)
           (when verbose
             (format t "iteration: ~A, kl-divergence: ~A, kkt-residual: ~,3E~%"
-                    iterations kl-value residual))
-          (when (and kkt-limit (plusp kkt-limit) (< residual kkt-limit))
-            (setf converged-p t)
-            (return-from done))
+                    iterations kl-value sweep-residual))
+          (when (and kkt-limit (plusp kkt-limit) (< sweep-residual kkt-limit))
+            ;; The screen tripped; confirm against the model that actually came
+            ;; out of the sweep before calling it converged.
+            (setf residual (%kkt-residual X-indices-matrix X-value-vector
+                                          X^-value-vector factor-matrix-vector
+                                          numerator-tmp denominator-tmp))
+            (setf residual-fresh t)
+            (when (< residual kkt-limit)
+              (setf converged-p t)
+              (return-from done))
+            (setf residual-fresh nil))
           (when threshold
             (setf (aref kl-buffer kl-index) kl-value)
             (setf kl-index (mod (1+ kl-index) window))
@@ -785,6 +842,9 @@ Returns six values:
                       (setf converged-p t)
                       (return-from done))))
                 (setf last-smooth smooth)))))))
+    (unless residual-fresh
+      (setf residual (%kkt-residual X-indices-matrix X-value-vector X^-value-vector
+                                    factor-matrix-vector numerator-tmp denominator-tmp)))
     (%check-factor-health factor-matrix-vector lambda-vector
                           :dead-component-threshold dead-component-threshold
                           :on-dead-component on-dead-component)
@@ -868,6 +928,8 @@ NUMERICAL-INSTABILITY-ERROR if the fit produces NaN or infinite factors."
     (error 'invalid-input-error
            :reason :invalid-n-starts
            :details (format nil "n-starts must be a positive integer, got ~S" n-starts)))
+  (setf kappa (coerce kappa 'double-float))
+  (setf kappa-tolerance (coerce kappa-tolerance 'double-float))
   (let* ((x-shape (sparse-tensor-shape tensor))
          (indices (sparse-tensor-indices tensor))
          (values (sparse-tensor-values tensor))

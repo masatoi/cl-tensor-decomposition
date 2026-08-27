@@ -28,7 +28,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **KKT-based convergence**: the run stops when `max |min(A, gradient)|` falls
   below `:kkt-tolerance` (default `1d-4`), which is zero exactly at a stationary
-  point of the non-negativity constrained problem. Pass `0` to disable. The older
+  point of the non-negativity constrained problem. Pass `0` to disable. A sweep
+  observes the residual for free, but each mode reports what it saw on entry, so
+  that value is used only as a screen; the residual convergence is decided on,
+  and that comes back as the seventh return value, is recomputed against the
+  completed model. Numeric arguments are coerced to double-float at the API
+  boundary, so `:kappa 0` and single-float tolerances work. The older
   `:convergence-threshold` moving-average test still works, but is weak on its
   own: averaging over a window dilutes the step-to-step change, so a larger
   `:convergence-window` reports convergence sooner, including on runs that have

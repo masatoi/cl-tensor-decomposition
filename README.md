@@ -315,7 +315,15 @@ so `max |min(A, gradient)|` is zero exactly at a stationary point, where the
 gradient of the generalized KL with respect to `A(i,r)` is
 `denominator(r) - numerator(i,r)`. The run stops when that falls below
 `:kkt-tolerance` (default `1d-4`, following Chi & Kolda); pass `0` to disable it
-and use the whole budget. The residual comes back as the seventh return value.
+and use the whole budget.
+
+A sweep observes that residual for free, since each update already has the
+gradients — but each mode reports what it saw **on entry**, so once the sweep has
+updated every mode and normalized the columns those numbers describe states that
+no longer exist. The free value therefore only acts as a screen. When it trips,
+and once more before returning, the residual is recomputed against the settled
+model; that is what convergence is decided on and what the seventh return value
+means.
 
 The older `:convergence-threshold` moving-average test still works and still
 stops the run, but it is weak on its own: averaging over a window dilutes the
@@ -401,6 +409,10 @@ and validation halves.
 
 The logarithm divides by `x^ + *epsilon*` so an underflowed reconstruction
 cannot yield `-infinity`; `*epsilon*` is not added to the total predicted mass.
+
+`:kappa`, `:kappa-tolerance` and `:kkt-tolerance` accept any real — they are
+coerced to double-float at the API boundary — so `:kappa 0` disables the
+inadmissible-zero fix without ceremony.
 
 ## Reference
 
