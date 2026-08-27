@@ -40,13 +40,16 @@ ros install masatoi/cl-tensor-decomposition
 (decomposition *tensor* :n-cycle 10 :r 2 :verbose t)
 
 #|
-cycle: 1, kl-divergence: 13.444468
-cycle: 2, kl-divergence: 12.223802
-...
-cycle: 10, kl-divergence: 2.2586484
-#(#2A((0.0 1.289) (0.734 0.0))
-  #2A((0.0 1.333) (0.0 0.444) (1.719 0.0))
-  #2A((0.0 0.436) (0.0 1.309) (0.0 0.0) (1.585 0.0)))
+iteration: 1, kl-divergence: 8.224610, kkt-residual: 3.463d+0
+iteration: 2, kl-divergence: 4.664016, kkt-residual: 1.851d+0
+iteration: 3, kl-divergence: 2.355427, kkt-residual: 8.964d-1
+iteration: 4, kl-divergence: 2.249334, kkt-residual: 9.448d-2
+iteration: 5, kl-divergence: 2.249334, kkt-residual: 4.010d-6
+
+;; stopped after 5 of 10 allowed iterations: the KKT residual reached 1d-4
+#(#2A((3.99999 0.00000) (0.00000 1.99999))
+  #2A((0.75000 0.00000) (0.25000 0.00000) (0.00000 1.00000))
+  #2A((0.25000 0.00000) (0.75000 0.00000) (0.00000 0.00000) (0.00000 1.00000)))
 |#
 ```
 
@@ -293,6 +296,68 @@ A sparse tensor consists of pairs of non-zero values and indices.
 A coordinate that is absent from the index matrix is an **observed zero**, not a
 missing value. There is no observation mask: the tensor is dense in meaning and
 sparse only in storage.
+
+### The optimizer
+
+One `:n-cycle` is a **full sweep**: every mode is updated once, with the
+reconstruction refreshed between modes. It used to count single-mode updates, so
+the same number now does as much work as there are modes — a `:n-cycle 100` on a
+3-mode tensor is 300 mode updates, not 100.
+
+**Convergence** is decided by the KKT residual, not only by the loss curve. At a
+solution of the non-negativity constrained problem every factor entry satisfies
+
+```
+A >= 0        gradient >= 0        A * gradient = 0
+```
+
+so `max |min(A, gradient)|` is zero exactly at a stationary point, where the
+gradient of the generalized KL with respect to `A(i,r)` is
+`denominator(r) - numerator(i,r)`. The run stops when that falls below
+`:kkt-tolerance` (default `1d-4`, following Chi & Kolda); pass `0` to disable it
+and use the whole budget. The residual comes back as the seventh return value.
+
+The older `:convergence-threshold` moving-average test still works and still
+stops the run, but it is weak on its own: averaging over a window dilutes the
+step-to-step change, so a larger `:convergence-window` reports convergence
+sooner — including on runs that have not converged.
+
+**Inadmissible zeros.** A multiplicative step is a product, so an entry that
+reaches zero can never come back, and the fit can stall at a point that is not
+KKT. Following [Chi & Kolda](https://arxiv.org/abs/1112.2414), an entry that is
+pinned at zero (below `:kappa-tolerance`) while its gradient is negative — it
+wants to grow — is nudged to `:kappa` (default `1d-2`) before the step. The
+first sweep runs without this, matching their `k > 1` condition.
+
+This fixes a single pinned entry. A *coordinated* collapse, where the matching
+entries in several modes are zero together, is a genuine boundary stationary
+point rather than a missed fix — a poor local optimum, which is what `:n-starts`
+is for.
+
+**Normalization and component weights.** After each sweep the columns are scaled
+to unit sum and the scale collected into an explicit weight per component, then
+folded back into mode 0. So the returned factors have unit-sum columns in every
+mode past the first, mode 0 carries the weights, and `sdot` still reads them
+directly. The weights come back as the sixth return value and sum to the total
+predicted mass.
+
+**Multiple starts.** Multiplicative updates only find a local optimum.
+`:n-starts` (default 1) runs that many random initializations and keeps the one
+with the lowest final KL.
+
+**Health checks.** A NaN or infinite factor entry signals
+`numerical-instability-error`. A component whose weight collapses is different —
+it usually just means the rank is larger than the data supports, which is what a
+rank sweep is looking for — so `:on-dead-component` chooses `:warn` (default),
+`:error`, or `:ignore`.
+
+```lisp
+(multiple-value-bind (factors iterations final-kl kl-history converged-p
+                      lambda kkt-residual)
+    (decomposition *tensor* :r 5 :n-cycle 200 :n-starts 4)
+  (format t "~a iterations, KL ~,4f, KKT ~,3e, weights ~a~%"
+          iterations final-kl kkt-residual lambda))
+```
 
 ### Objective function
 

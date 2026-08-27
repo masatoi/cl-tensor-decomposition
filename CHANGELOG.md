@@ -8,6 +8,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Breaking Changes
 
+- **`:n-cycle` counts outer iterations**: one cycle is now a full sweep over all
+  modes rather than a single mode update, so the same number does as much work as
+  there are modes. A `:n-cycle 100` on a 3-mode tensor is 300 mode updates.
+
+  Counting a single mode as an iteration made `:n-cycle` mean different amounts
+  of work for tensors of different order, and made the convergence window compare
+  points that were only partly updated.
+
+- **`decomposition` returns seven values**: the existing five, plus the component
+  weight vector and the final KKT residual.
+
+- **The returned factors are normalized**: every mode past the first has unit-sum
+  columns and mode 0 carries the component weights. The model is unchanged and
+  `sdot` still reads the factors directly; only the split of scale across modes
+  differs.
+
+### Added
+
+- **KKT-based convergence**: the run stops when `max |min(A, gradient)|` falls
+  below `:kkt-tolerance` (default `1d-4`), which is zero exactly at a stationary
+  point of the non-negativity constrained problem. Pass `0` to disable. The older
+  `:convergence-threshold` moving-average test still works, but is weak on its
+  own: averaging over a window dilutes the step-to-step change, so a larger
+  `:convergence-window` reports convergence sooner, including on runs that have
+  not converged.
+
+- **Inadmissible-zero handling**: a multiplicative step cannot revive an entry
+  that has reached zero, so the fit can stall at a non-KKT point. An entry below
+  `:kappa-tolerance` (default `1d-10`) whose gradient is negative is nudged to
+  `:kappa` (default `1d-2`) before the step, following Chi & Kolda
+  (arXiv:1112.2414, Algorithm 3). The first sweep runs without it, matching their
+  `k > 1` condition. This fixes a single pinned entry; a coordinated collapse
+  across modes is a genuine boundary stationary point, which `:n-starts`
+  addresses instead.
+
+- **Explicit component weights**: columns are normalized after each sweep and the
+  scale collected into a weight per component, returned as the sixth value. The
+  weights sum to the total predicted mass.
+
+- **`:n-starts`** (default 1): run that many random initializations and keep the
+  one with the lowest final KL. Multiplicative updates only find a local optimum.
+
+- **Health checks that actually signal**: a NaN or infinite factor entry signals
+  `numerical-instability-error`, naming the mode, row and column.
+  `:on-dead-component` handles a component whose weight collapses — `:warn`
+  (default), `:error`, or `:ignore`. It defaults to warning rather than erroring
+  because a dead component usually means the rank exceeds what the data supports,
+  which is exactly what a rank sweep is looking for; erroring would break
+  `select-rank`.
+
 - **Cross-validation now splits counts, not coordinates**: `cross-validate-rank`,
   `select-rank` and `select-rank-1se` take a `sparse-tensor` instead of separate
   `indices` and `counts` arguments, and folds are built by Poisson (multinomial)

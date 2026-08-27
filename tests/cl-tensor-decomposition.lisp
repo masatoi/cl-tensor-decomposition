@@ -2998,3 +2998,224 @@ duplicate without ever reaching the larger candidates."
   (ok (handler-case (progn (cltd:select-rank-elbow CV-tensor '(1 2) :k 3 :tolerance -1d0) nil)
         (cltd:invalid-input-error () t))
       "Negative tolerance is rejected"))
+
+;;; ---------------------------------------------------------------------------
+;;; Optimizer robustness: outer iterations, KKT, inadmissible zeros, lambda
+;;; ---------------------------------------------------------------------------
+
+(defun %make-workspace (shape r)
+  "Allocate the scratch arrays DECOMPOSITION-INNER expects (test-only)."
+  (let ((n-modes (length shape)))
+    (values (make-array n-modes :initial-contents
+                        (loop for dim in shape
+                              collect (make-array (list dim r) :element-type 'double-float
+                                                              :initial-element 0d0)))
+            (make-array (list n-modes r) :element-type 'double-float
+                                         :initial-element 1d0))))
+
+(defun %copy-factors (factors)
+  (make-array (length factors) :initial-contents
+              (loop for m across factors
+                    collect (let ((c (make-array (array-dimensions m)
+                                                 :element-type 'double-float)))
+                              (loop for i from 0 below (array-dimension m 0)
+                                    do (loop for r from 0 below (array-dimension m 1)
+                                             do (setf (aref c i r) (aref m i r))))
+                              c))))
+
+(defun %factors-differ-p (a b)
+  (loop for i from 0 below (array-dimension a 0)
+        thereis (loop for r from 0 below (array-dimension a 1)
+                      thereis (> (abs (- (aref a i r) (aref b i r))) 0d0))))
+
+(deftest one-outer-iteration-updates-every-mode
+  "A cycle is a full sweep: one iteration must touch all three factor matrices."
+  (let* ((shape '(2 3 4))
+         (r 2)
+         (values X-value-vector)
+         (x-hat (make-array (length values) :element-type 'double-float
+                                            :initial-element 1d0))
+         (*random-state* (cltd:%seed-random-state 5)))
+    (multiple-value-bind (numerator denominator) (%make-workspace shape r)
+      (let ((factors (make-array 3 :initial-contents
+                                 (loop for dim in shape
+                                       collect (cltd:initialize-random-matrix
+                                                (make-array (list dim r)
+                                                            :element-type 'double-float))))))
+        (let ((before (%copy-factors factors)))
+          (multiple-value-bind (iterations final-kl kl-history)
+              (cltd:decomposition-inner 1 X-indices-matrix values x-hat
+                                        factors numerator denominator)
+            (declare (ignore final-kl))
+            (ok (= iterations 1) "One outer iteration was executed")
+            (ok (= (length kl-history) 1) "One KL history entry per outer iteration")
+            (dotimes (mode 3)
+              (ok (%factors-differ-p (svref factors mode) (svref before mode))
+                  (format nil "Mode ~D was updated within the single outer iteration"
+                          mode)))))))))
+
+(deftest decomposition-reports-lambda-and-normalized-modes
+  "Columns are normalized and the component weights are returned explicitly."
+  (let* ((*random-state* (cltd:%seed-random-state 13))
+         (r 3))
+    (multiple-value-bind (factors iterations final-kl kl-history converged-p lambda)
+        (cltd:decomposition X-tensor :r r :n-cycle 20)
+      (declare (ignore iterations kl-history converged-p))
+      (ok (= (length lambda) r) "One lambda per component")
+      (ok (every (lambda (v) (>= v 0d0)) lambda) "Component weights are non-negative")
+      ;; Total predicted mass is exactly the sum of the component weights.
+      (ok (< (abs (- (reduce #'+ lambda) (cltd::%cp-total-mass factors))) 1d-8)
+          (format nil "sum(lambda) ~,8F equals the total predicted mass ~,8F"
+                  (reduce #'+ lambda) (cltd::%cp-total-mass factors)))
+      ;; Every mode but the first carries unit-sum columns; mode 0 carries lambda.
+      (loop for mode from 1 below (length factors)
+            do (let ((m (svref factors mode)))
+                 (dotimes (ri r)
+                   (let ((column-sum (loop for i from 0 below (array-dimension m 0)
+                                           sum (aref m i ri))))
+                     (ok (< (abs (- column-sum 1d0)) 1d-8)
+                         (format nil "mode ~D column ~D sums to 1 (~,8F)"
+                                 mode ri column-sum))))))
+      (dotimes (ri r)
+        (let* ((m (svref factors 0))
+               (column-sum (loop for i from 0 below (array-dimension m 0)
+                                 sum (aref m i ri))))
+          (ok (< (abs (- column-sum (aref lambda ri))) 1d-8)
+              (format nil "mode 0 column ~D sums to lambda[~D]" ri ri))))
+      ;; Normalization is a change of representation only: the loss is unchanged.
+      (let ((x-hat (make-array (length X-value-vector) :element-type 'double-float
+                                                       :initial-element 0d0)))
+        (cltd:sdot factors X-indices-matrix x-hat)
+        (ok (< (abs (- final-kl (cltd:sparse-kl-divergence X-indices-matrix X-value-vector
+                                                           x-hat factors)))
+               1d-9)
+            "final-kl still matches a KL recomputed from the returned factors")))))
+
+(deftest decomposition-reports-kkt-residual
+  "The KKT residual is returned and drives convergence."
+  (let ((*random-state* (cltd:%seed-random-state 21)))
+    (multiple-value-bind (factors iterations final-kl kl-history converged-p lambda residual)
+        (cltd:decomposition X-tensor :r 2 :n-cycle 400 :kkt-tolerance 1d-4)
+      (declare (ignore factors final-kl kl-history lambda))
+      (ok (typep residual 'double-float) "KKT residual is a double-float")
+      (ok (>= residual 0d0) "KKT residual is non-negative")
+      (when converged-p
+        (ok (< residual 1d-4)
+            (format nil "Converged with residual ~,3E below the tolerance" residual))
+        (ok (< iterations 400) "Stopped before the iteration cap"))))
+  (let ((*random-state* (cltd:%seed-random-state 21)))
+    (multiple-value-bind (factors iterations final-kl kl-history converged-p)
+        (cltd:decomposition X-tensor :r 2 :n-cycle 15 :kkt-tolerance 0d0)
+      (declare (ignore factors final-kl kl-history))
+      (ok (= iterations 15) "A zero tolerance runs the full iteration budget")
+      (ok (not converged-p) "A zero tolerance never reports convergence"))))
+
+(deftest inadmissible-zero-is-lifted-off-the-boundary
+  "An entry pinned at zero whose gradient wants it to grow must be able to.
+
+A plain multiplicative step keeps a zero at zero forever, because the step is a
+product, so the fit can stall at a point that is not KKT. Chi and Kolda nudge
+such an entry to KAPPA first. This exercises UPDATE directly: the condition only
+holds while the gradient is still negative, and within a full run the surrounding
+modes may collapse alongside it into a genuine boundary stationary point, which
+is a local optimum rather than a missed fix and is what :N-STARTS addresses."
+  (labels ((run (kappa)
+             (let* ((rank 1)
+                    (x-hat (make-array (length X-value-vector)
+                                       :element-type 'double-float :initial-element 1d0))
+                    (*random-state* (cltd:%seed-random-state 77)))
+               (multiple-value-bind (numerator denominator) (%make-workspace '(2 3 4) rank)
+                 (let ((factors (make-array 3 :initial-contents
+                                            (loop for dim in '(2 3 4)
+                                                  collect (cltd:initialize-random-matrix
+                                                           (make-array (list dim rank)
+                                                                       :element-type 'double-float))))))
+                   (setf (aref (svref factors 0) 0 0) 0d0)
+                   (cltd:sdot factors X-indices-matrix x-hat)
+                   (let ((residual (cltd::update X-indices-matrix X-value-vector x-hat
+                                                 factors 0 numerator denominator
+                                                 :kappa kappa :allow-scooch t)))
+                     (values (aref (svref factors 0) 0 0)
+                             residual
+                             (- (aref denominator 0 0)
+                                (aref (svref numerator 0) 0 0)))))))))
+    (multiple-value-bind (value residual gradient) (run 1d-2)
+      (ok (minusp gradient)
+          (format nil "The pinned entry has a negative gradient (~,3E), so it wants to grow"
+                  gradient))
+      (ok (> residual 1d0)
+          (format nil "The KKT residual reports the violation (~,3E)" residual))
+      (ok (plusp value)
+          (format nil "With kappa 1e-2 the entry escapes zero (~,4F)" value)))
+    (ok (zerop (run 0d0))
+        "With kappa 0 the entry stays at zero, as a plain multiplicative step does")))
+
+(deftest decomposition-n-starts-keeps-the-best-fit
+  "With several starts the reported fit is no worse than the first one alone."
+  (let ((single (let ((*random-state* (cltd:%seed-random-state 31)))
+                  (nth-value 2 (cltd:decomposition X-tensor :r 3 :n-cycle 30
+                                                            :n-starts 1))))
+        (multi (let ((*random-state* (cltd:%seed-random-state 31)))
+                 (nth-value 2 (cltd:decomposition X-tensor :r 3 :n-cycle 30
+                                                           :n-starts 4)))))
+    (ok (<= multi (+ single 1d-9))
+        (format nil "4 starts reach ~,6F, no worse than 1 start at ~,6F" multi single)))
+  (ok (handler-case (progn (cltd:decomposition X-tensor :r 2 :n-cycle 5 :n-starts 0) nil)
+        (cltd:invalid-input-error () t))
+      ":n-starts 0 is rejected"))
+
+(deftest decomposition-signals-numerical-instability
+  "NaN and infinite factor entries are reported rather than returned.
+
+Infinity is used for the literal because it has a portable one; the scan treats
+NaN identically."
+  (let ((lambda-vector (make-array 2 :element-type 'double-float :initial-element 1d0))
+        (factors (make-array 2 :initial-contents
+                             (list (make-array '(2 2) :element-type 'double-float
+                                                      :initial-element 0.5d0)
+                                   (make-array '(3 2) :element-type 'double-float
+                                                      :initial-element 0.5d0)))))
+    (ok (null (cltd::%check-factor-health factors lambda-vector))
+        "Healthy factors report nothing")
+    (setf (aref (svref factors 1) 1 0) cltd:+double-float-positive-infinity+)
+    (ok (handler-case (progn (cltd::%check-factor-health factors lambda-vector) nil)
+          (cltd:numerical-instability-error (condition)
+            (and (equal (cltd:instability-location condition) '(:mode 1 :row 1 :column 0))
+                 (cltd:%float-infinity-p (cltd:instability-value condition)))))
+        "An infinite entry signals numerical-instability-error naming its position")))
+
+(deftest decomposition-reports-dead-components
+  "A component whose weight collapses is reported, but does not abort the fit.
+
+Erroring by default would break rank sweeps, where a rank past what the data
+supports is exactly the answer being looked for."
+  (let ((factors (make-array 2 :initial-contents
+                             (list (make-array '(2 3) :element-type 'double-float
+                                                      :initial-element 0.5d0)
+                                   (make-array '(3 3) :element-type 'double-float
+                                                      :initial-element 0.5d0))))
+        (lambda-vector (make-array 3 :element-type 'double-float
+                                     :initial-contents '(1d0 0d0 2d0))))
+    (ok (equal (handler-bind ((warning #'muffle-warning))
+                 (cltd::%check-factor-health factors lambda-vector))
+               '(1))
+        "The dead component is identified by index")
+    (ok (handler-case (progn (cltd::%check-factor-health factors lambda-vector
+                                                         :on-dead-component :warn)
+                             nil)
+          (warning () t))
+        "The default warns")
+    (ok (handler-case (progn (cltd::%check-factor-health factors lambda-vector
+                                                         :on-dead-component :error)
+                             nil)
+          (cltd:numerical-instability-error () t))
+        ":error signals numerical-instability-error")
+    (ok (handler-case (progn (cltd::%check-factor-health factors lambda-vector
+                                                         :on-dead-component :ignore)
+                             t)
+          (warning () nil))
+        ":ignore is silent")
+    (ok (null (handler-bind ((warning #'muffle-warning))
+                (cltd::%check-factor-health
+                 factors (make-array 3 :element-type 'double-float :initial-element 1d0))))
+        "Live components report nothing")))
