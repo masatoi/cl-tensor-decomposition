@@ -345,6 +345,73 @@ candidate ranks, so reordering RANKS cannot change any rank's scores."
           (cons :scores scores)
           (cons :validation-counts validation-counts))))
 
+(defstruct (cv-plan (:constructor %make-cv-plan-1))
+  "Everything a cross-validation sweep needs that does not depend on the rank.
+
+Building it once and scoring every candidate rank against it is what makes a
+rank's scores independent of the other candidates, and what lets an early-
+stopping sweep compare ranks it evaluated one at a time.
+
+K                - number of folds
+PREDICTION-SCALE - exposure ratio 1/(K-1) applied to validation predictions
+FOLD-DATA        - per fold, (train-tensor valid-tensor train-total valid-total)
+INIT-STATES      - per fold, the random state its factor matrices start from"
+  (k 0 :type fixnum :read-only t)
+  (prediction-scale 1.0d0 :type double-float :read-only t)
+  (fold-data nil :type list :read-only t)
+  (init-states nil :type list :read-only t))
+
+(defun %make-cv-plan (tensor k random-state)
+  "Thin TENSOR into K folds and fix each fold's initialization state.
+
+RANDOM-STATE is copied, so the caller's state is never advanced."
+  (let* ((state (make-random-state (or random-state *random-state*)))
+         (folds (make-poisson-folds tensor k :random-state state)))
+    (%make-cv-plan-1 :k k
+                     :prediction-scale (poisson-folds-prediction-scale folds)
+                     :fold-data (loop for fold-index from 0 below k
+                                      collect (multiple-value-list
+                                               (poisson-fold-tensors folds fold-index)))
+                     :init-states (%spawn-init-states k state))))
+
+(defun %score-rank (plan rank &key (n-cycle 100)
+                                   convergence-threshold convergence-window
+                                   (evaluation-function
+                                    (function normalized-generalized-kl))
+                                   verbose progress-total (progress-offset 0))
+  "Cross-validate a single RANK over the folds of PLAN.
+
+Returns the result alist %SUMMARIZE-SCORES builds. PROGRESS-TOTAL and
+PROGRESS-OFFSET only shape the verbose line; pass NIL for PROGRESS-TOTAL when
+the number of fits is not known in advance."
+  (let ((k (cv-plan-k plan))
+        (prediction-scale (cv-plan-prediction-scale plan))
+        (scores '())
+        (counts '()))
+    (loop for datum in (cv-plan-fold-data plan)
+          for init-state in (cv-plan-init-states plan)
+          for fold-index from 0
+          do (destructuring-bind (train valid train-total valid-total) datum
+               (declare (ignore train-total))
+               (let ((score (%evaluate-fold train valid rank prediction-scale
+                                            valid-total init-state
+                                            :n-cycle n-cycle
+                                            :convergence-threshold convergence-threshold
+                                            :convergence-window convergence-window
+                                            :evaluation-function evaluation-function
+                                            :verbose verbose)))
+                 (push score scores)
+                 (push valid-total counts)
+                 (when verbose
+                   (if progress-total
+                       (format t "rank ~D fold ~D/~D: score ~,6F (~D/~D done)~%"
+                               rank (1+ fold-index) k score
+                               (+ progress-offset fold-index 1) progress-total)
+                       (format t "rank ~D fold ~D/~D: score ~,6F~%"
+                               rank (1+ fold-index) k score))
+                   (finish-output)))))
+    (%summarize-scores rank (nreverse scores) (nreverse counts) k)))
+
 (defun cross-validate-rank (tensor ranks
                             &key (k 5) (n-cycle 100)
                                  convergence-threshold convergence-window
@@ -388,40 +455,19 @@ Returns a list of result alists in the order of RANKS, each containing:
 Signals INVALID-INPUT-ERROR for invalid ranks, an invalid K, or a tensor whose
 counts are not usable non-negative integers."
   (%validate-ranks ranks)
-  (let* ((state (make-random-state (or random-state *random-state*)))
-         (folds (make-poisson-folds tensor k :random-state state))
-         (prediction-scale (poisson-folds-prediction-scale folds))
-         (init-states (%spawn-init-states k state))
-         (fold-data (loop for fold-index from 0 below k
-                          collect (multiple-value-list
-                                   (poisson-fold-tensors folds fold-index))))
-         (total (* (length ranks) k))
-         (completed 0))
+  (let ((plan (%make-cv-plan tensor k random-state))
+        (total (* (length ranks) k))
+        (completed 0))
     (loop for rank in ranks
-          collect (let ((scores '())
-                        (counts '()))
-                    (loop for datum in fold-data
-                          for init-state in init-states
-                          for fold-index from 0
-                          do (destructuring-bind (train valid train-total valid-total)
-                                 datum
-                               (declare (ignore train-total))
-                               (let ((score (%evaluate-fold
-                                             train valid rank prediction-scale
-                                             valid-total init-state
-                                             :n-cycle n-cycle
-                                             :convergence-threshold convergence-threshold
-                                             :convergence-window convergence-window
-                                             :evaluation-function evaluation-function
-                                             :verbose verbose)))
-                                 (push score scores)
-                                 (push valid-total counts)
-                                 (incf completed)
-                                 (when verbose
-                                   (format t "rank ~D fold ~D/~D: score ~,6F (~D/~D done)~%"
-                                           rank (1+ fold-index) k score completed total)
-                                   (finish-output)))))
-                    (%summarize-scores rank (nreverse scores) (nreverse counts) k)))))
+          collect (prog1 (%score-rank plan rank
+                                      :n-cycle n-cycle
+                                      :convergence-threshold convergence-threshold
+                                      :convergence-window convergence-window
+                                      :evaluation-function evaluation-function
+                                      :verbose verbose
+                                      :progress-total total
+                                      :progress-offset completed)
+                    (incf completed k)))))
 
 ;;; ============================================================
 ;;; Rank selection
@@ -467,6 +513,104 @@ Example:
                                          :random-state random-state
                                          :verbose verbose)))
     (values (%best-result cv-results) cv-results)))
+
+(defun select-rank-elbow (tensor ranks
+                          &key (k 5) (n-cycle 100)
+                               convergence-threshold convergence-window
+                               (evaluation-function
+                                (function normalized-generalized-kl))
+                               (tolerance 1.0d0) (patience 1)
+                               random-state verbose)
+  "Walk the candidate ranks upward and stop once a rank stops paying for itself.
+
+After each rank, the improvement over the best score so far is compared with the
+noise in that score:
+
+  gain  = mean[best] - mean[rank]
+  noise = TOLERANCE * standard-error[rank]
+
+A gain above the noise makes RANK the new best and resets the counter; otherwise
+the counter advances, and the sweep stops once PATIENCE consecutive ranks have
+failed to pay. This is a sequential form of the 1-SE rule, which is why it tends
+to agree with SELECT-RANK-1SE while fitting fewer models.
+
+Every rank is scored against the same folds and the same per-fold initialization
+states, so the scores are directly comparable to those CROSS-VALIDATE-RANK
+returns for the same TENSOR, K and RANDOM-STATE.
+
+TENSOR, K, N-CYCLE, CONVERGENCE-THRESHOLD, CONVERGENCE-WINDOW,
+EVALUATION-FUNCTION, RANDOM-STATE and VERBOSE behave as in CROSS-VALIDATE-RANK.
+RANKS may be in any order and may repeat; a sorted, deduplicated copy is used
+and the caller's list is left alone.
+TOLERANCE - how many standard errors an improvement must clear to count;
+            defaults to 1. Larger values stop sooner.
+PATIENCE  - how many consecutive unpaid ranks to allow before stopping;
+            defaults to 1.
+
+The rule is greedy: it assumes the curve falls to an elbow and then flattens. A
+curve that plateaus and only improves again at a much larger rank would be cut
+short, which is what PATIENCE is there to soften. Use CROSS-VALIDATE-RANK when
+the whole curve matters.
+
+Returns two values:
+  1. The result alist for the selected rank
+  2. The results for the ranks that were actually evaluated, in ascending order
+
+Unlike SELECT-RANK and SELECT-RANK-1SE, the second value covers only the ranks
+the sweep reached, not the whole candidate list -- that is the point. It also
+carries no repeats, whatever RANKS contained.
+
+Signals INVALID-INPUT-ERROR for invalid ranks, a negative TOLERANCE, a PATIENCE
+below 1, or the same tensor and K problems CROSS-VALIDATE-RANK reports."
+  (%validate-ranks ranks)
+  (unless (and (realp tolerance) (not (minusp tolerance)))
+    (error 'invalid-input-error
+           :reason :invalid-tolerance
+           :details (format nil "tolerance must be a non-negative real, got ~S"
+                            tolerance)))
+  (unless (and (integerp patience) (plusp patience))
+    (error 'invalid-input-error
+           :reason :invalid-patience
+           :details (format nil "patience must be a positive integer, got ~S"
+                            patience)))
+  (let ((plan (%make-cv-plan tensor k random-state))
+        ;; Duplicates are collapsed: the same rank scored twice against the same
+        ;; folds gives the same mean, so the second copy would look like a rank
+        ;; that failed to pay and stop the sweep before reaching the rest.
+        (ascending (remove-duplicates (sort (copy-list ranks) (function <))))
+        (threshold (coerce tolerance 'double-float))
+        (evaluated '())
+        (best nil)
+        (stall 0))
+    (block sweep
+      (dolist (rank ascending)
+        (let ((result (%score-rank plan rank
+                                   :n-cycle n-cycle
+                                   :convergence-threshold convergence-threshold
+                                   :convergence-window convergence-window
+                                   :evaluation-function evaluation-function
+                                   :verbose verbose)))
+          (push result evaluated)
+          (if (null best)
+              (setf best result)
+              (let ((gain (- (cdr (assoc :mean best)) (cdr (assoc :mean result))))
+                    (noise (* threshold (cdr (assoc :standard-error result)))))
+                (cond ((> gain noise)
+                       (setf best result)
+                       (setf stall 0))
+                      (t
+                       (incf stall)
+                       (when verbose
+                         (format t "rank ~D gains ~,6F, within ~,6F of noise (~D/~D)~%"
+                                 rank gain noise stall patience)
+                         (finish-output))))))
+          (when (>= stall patience)
+            (when verbose
+              (format t "stopping at rank ~D; selected rank ~D~%"
+                      rank (cdr (assoc :rank best)))
+              (finish-output))
+            (return-from sweep)))))
+    (values best (nreverse evaluated))))
 
 (defun select-rank-1se (tensor ranks
                         &key (k 5) (n-cycle 100)

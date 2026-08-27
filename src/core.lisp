@@ -23,6 +23,7 @@
            :cross-validate-rank
            :select-rank
            :select-rank-1se
+           :select-rank-elbow
            ;; sparse-tensor structure and accessors
            :sparse-tensor
            :make-sparse-tensor
