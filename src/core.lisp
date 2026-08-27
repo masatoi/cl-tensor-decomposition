@@ -917,19 +917,31 @@ Returns six values:
        (%absorb-lambda factor-matrix-vector lambda-vector)
        (sdot factor-matrix-vector X-indices-matrix X^-value-vector)
        (setf final-kl (sparse-kl-divergence X-indices-matrix X-value-vector
-                                            X^-value-vector factor-matrix-vector))))
-    (unless residual-fresh
-      (setf residual (%kkt-residual X-indices-matrix X-value-vector X^-value-vector
-                                    factor-matrix-vector numerator-tmp denominator-tmp))
-      ;; The screen is measured before each mode's own update, so a sweep that
-      ;; lands on a solution shows a large screen and a small settled residual.
-      ;; Deciding only on the screen would return a residual under the tolerance
-      ;; while reporting that the run did not converge.
-      (when (and kkt-limit (plusp kkt-limit) (< residual kkt-limit))
-        (setf converged-p t)))
-    (%check-factor-health factor-matrix-vector lambda-vector
-                          :dead-component-threshold dead-component-threshold
-                          :on-dead-component on-dead-component)
+                                            X^-value-vector factor-matrix-vector)))
+     ;; The settled residual runs CALC-NUMERATOR, which divides an observed count
+     ;; by the reconstruction, so it can overflow on the same inputs the sweep
+     ;; can. It stays inside the mask for the same reason the sweep does: the
+     ;; library reports what went wrong, rather than letting an implementation
+     ;; floating-point condition escape from a specialized loop.
+     (unless residual-fresh
+       (setf residual (%kkt-residual X-indices-matrix X-value-vector X^-value-vector
+                                     factor-matrix-vector numerator-tmp denominator-tmp))
+       ;; The screen is measured before each mode's own update, so a sweep that
+       ;; lands on a solution shows a large screen and a small settled residual.
+       ;; Deciding only on the screen would return a residual under the tolerance
+       ;; while reporting that the run did not converge.
+       (when (and kkt-limit (plusp kkt-limit) (< residual kkt-limit))
+         (setf converged-p t)))
+     ;; A residual outside the double range describes no model, so it is a
+     ;; failure rather than a large number worth returning.
+     (when (or (%float-nan-p residual) (%float-infinity-p residual))
+       (error 'numerical-instability-error
+              :location :kkt-residual
+              :value residual
+              :operation "KKT residual"))
+     (%check-factor-health factor-matrix-vector lambda-vector
+                           :dead-component-threshold dead-component-threshold
+                           :on-dead-component on-dead-component))
     (values iterations final-kl kl-history converged-p lambda-vector residual)))
 
 (defstruct mode-spec

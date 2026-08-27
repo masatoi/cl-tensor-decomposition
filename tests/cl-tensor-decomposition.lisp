@@ -3431,3 +3431,49 @@ loss before anything looked again."
      (ok (< (abs (- (aref lambda-vector 0) 25d0)) 1d-9)
          (format nil "Ordinary factors still normalize (weight ~,4F = 5 * 5)"
                  (aref lambda-vector 0))))))
+
+(deftest decomposition-inner-keeps-its-tail-under-the-trap-mask
+  "The settled residual is computed after the loop, and must be guarded too.
+
+%KKT-RESIDUAL runs CALC-NUMERATOR, which divides an observed count by the
+reconstruction. A large count over a small reconstruction overflows, so leaving
+that call outside the mask let an implementation floating-point condition escape
+instead of the library's own."
+  (let ((indices (make-array '(1 1) :element-type 'fixnum :initial-contents '((0))))
+        (values (make-array 1 :element-type 'double-float :initial-contents '(1d308)))
+        (x-hat (make-array 1 :element-type 'double-float :initial-element 1d0))
+        (numerator (make-array 1 :initial-contents
+                               (list (make-array '(1 1) :element-type 'double-float
+                                                        :initial-element 0d0))))
+        (denominator (make-array '(1 1) :element-type 'double-float
+                                        :initial-element 1d0))
+        (factors (make-array 1 :initial-contents
+                             (list (make-array '(1 1) :element-type 'double-float
+                                                      :initial-contents '((0.1d0)))))))
+    (ok (handler-case
+            (progn (cltd:decomposition-inner 0 indices values x-hat
+                                             factors numerator denominator
+                                             :on-dead-component :ignore)
+                   :returned-normally)
+          (cltd:numerical-instability-error () t)
+          (error () nil))
+        "A residual that leaves the double range is reported by the library")))
+
+(deftest decomposition-inner-reports-a-non-finite-residual
+  "A residual that is not finite describes no model and must not be returned."
+  (cltd::%with-float-traps-masked
+   (let ((indices (make-array '(1 1) :element-type 'fixnum :initial-contents '((0))))
+         (values (make-array 1 :element-type 'double-float :initial-contents '(1d308)))
+         (x-hat (make-array 1 :element-type 'double-float :initial-element 1d0))
+         (numerator (make-array 1 :initial-contents
+                                (list (make-array '(1 1) :element-type 'double-float
+                                                         :initial-element 0d0))))
+         (denominator (make-array '(1 1) :element-type 'double-float
+                                         :initial-element 1d0))
+         (factors (make-array 1 :initial-contents
+                              (list (make-array '(1 1) :element-type 'double-float
+                                                       :initial-contents '((0.1d0)))))))
+     (cltd:sdot factors indices x-hat)
+     (ok (cltd:%float-infinity-p
+          (cltd::%kkt-residual indices values x-hat factors numerator denominator))
+         "The residual really does overflow for this input, so the guard has work to do"))))
