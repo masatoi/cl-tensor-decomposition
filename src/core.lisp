@@ -660,6 +660,39 @@ factors directly usable without a separate lambda argument."
                      do (setf (aref matrix i ri) (* (aref matrix i ri) weight))))))
   factor-matrix-vector)
 
+(defmacro %with-float-traps-masked (&body body)
+  "Run BODY with the IEEE traps masked where the implementation supports it.
+
+The optimizer detects NaN and infinity itself and reports
+NUMERICAL-INSTABILITY-ERROR naming the mode, row and column that went bad, which
+is far more useful than an implementation's own floating-point condition. That
+only works if the arithmetic is allowed to produce the bad value rather than
+trapping on it, so the traps are masked over the iteration and %CHECK-FACTOR-VALUES
+is what actually reports the failure. Implementations that do not trap by default
+need nothing here."
+  #+sbcl `(sb-int:with-float-traps-masked (:invalid :overflow :divide-by-zero)
+            ,@body)
+  #-sbcl `(progn ,@body))
+
+(defun %check-factor-values (factor-matrix-vector)
+  "Signal NUMERICAL-INSTABILITY-ERROR on the first NaN or infinite factor entry.
+
+Scanning costs O(R * sum_m I_m), the size of the factors themselves, which is
+small beside a sweep's O(nnz * R * n-modes). It runs before the iteration starts
+and again after each sweep's updates, so a bad value is reported before it can
+spread through normalization, SDOT and the loss."
+  (loop for mode from 0 below (length factor-matrix-vector)
+        do (let ((matrix (svref factor-matrix-vector mode)))
+             (loop for i from 0 below (array-dimension matrix 0)
+                   do (loop for ri from 0 below (array-dimension matrix 1)
+                            do (let ((value (aref matrix i ri)))
+                                 (when (or (%float-nan-p value)
+                                           (%float-infinity-p value))
+                                   (error 'numerical-instability-error
+                                          :location (list :mode mode :row i :column ri)
+                                          :value value
+                                          :operation "factor matrix update"))))))))
+
 (defun %check-factor-health (factor-matrix-vector lambda-vector
                              &key (dead-component-threshold 1.0d-10)
                                   (on-dead-component :warn))
@@ -678,17 +711,7 @@ there would break SELECT-RANK, so ON-DEAD-COMPONENT chooses:
   :ignore say nothing
 
 Returns the list of dead component indices."
-  (loop for mode from 0 below (length factor-matrix-vector)
-        do (let ((matrix (svref factor-matrix-vector mode)))
-             (loop for i from 0 below (array-dimension matrix 0)
-                   do (loop for ri from 0 below (array-dimension matrix 1)
-                            do (let ((value (aref matrix i ri)))
-                                 (when (or (%float-nan-p value)
-                                           (%float-infinity-p value))
-                                   (error 'numerical-instability-error
-                                          :location (list :mode mode :row i :column ri)
-                                          :value value
-                                          :operation "factor matrix update")))))))
+  (%check-factor-values factor-matrix-vector)
   (let ((dead (loop for ri from 0 below (length lambda-vector)
                     when (< (aref lambda-vector ri) dead-component-threshold)
                       collect ri)))
@@ -781,7 +804,12 @@ Returns six values:
          (residual-fresh nil)
          (iterations 0)
          (converged-p nil))
-    (block done
+    ;; Reject bad factors before any arithmetic touches them, so a caller that
+    ;; hands in a NaN gets the documented condition rather than a trap from deep
+    ;; inside a specialized loop.
+    (%check-factor-values factor-matrix-vector)
+    (%with-float-traps-masked
+     (block done
       ;; Seed the reconstruction from the initial factors; from here on every
       ;; mode update is followed by an SDOT, so the reconstruction, the factor
       ;; matrices and the reported KL always describe the same state.
@@ -804,6 +832,9 @@ Returns six values:
                                     :allow-scooch (plusp iteration))))
                  (when (< mode (1- n-modes))
                    (sdot factor-matrix-vector X-indices-matrix X^-value-vector)))
+        ;; Catch an overflow the sweep just produced, before normalizing divides
+        ;; by it and SDOT and the loss carry it further.
+        (%check-factor-values factor-matrix-vector)
         (%normalize-factors factor-matrix-vector lambda-vector)
         (%absorb-lambda factor-matrix-vector lambda-vector)
         (sdot factor-matrix-vector X-indices-matrix X^-value-vector)
@@ -841,10 +872,16 @@ Returns six values:
                     (when (< ratio threshold)
                       (setf converged-p t)
                       (return-from done))))
-                (setf last-smooth smooth)))))))
+                (setf last-smooth smooth))))))))
     (unless residual-fresh
       (setf residual (%kkt-residual X-indices-matrix X-value-vector X^-value-vector
-                                    factor-matrix-vector numerator-tmp denominator-tmp)))
+                                    factor-matrix-vector numerator-tmp denominator-tmp))
+      ;; The screen is measured before each mode's own update, so a sweep that
+      ;; lands on a solution shows a large screen and a small settled residual.
+      ;; Deciding only on the screen would return a residual under the tolerance
+      ;; while reporting that the run did not converge.
+      (when (and kkt-limit (plusp kkt-limit) (< residual kkt-limit))
+        (setf converged-p t)))
     (%check-factor-health factor-matrix-vector lambda-vector
                           :dead-component-threshold dead-component-threshold
                           :on-dead-component on-dead-component)

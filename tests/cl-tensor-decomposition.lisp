@@ -3286,3 +3286,61 @@ a single-float from a caller must not reach it undeclared."
               t)
           (error () nil))
         (format nil "kappa-tolerance ~S (~A) is accepted" tolerance (type-of tolerance)))))
+
+(deftest decomposition-convergence-agrees-with-the-reported-residual
+  "A run must not report a residual under the tolerance while denying convergence.
+
+The in-sweep screen is measured before each mode's own update, so a sweep that
+lands on a solution shows a large screen and a small settled residual. Gating the
+exact check on the screen alone let a budget-exhausting run return a residual of
+1.0e-6 against a 1d-4 tolerance with CONVERGED-P nil."
+  (dolist (n-cycle '(1 2 3 4 5 6 8))
+    (let ((*random-state* (cltd:%seed-random-state 20260827)))
+      (multiple-value-bind (factors iterations final-kl kl-history converged-p lambda residual)
+          (cltd:decomposition X-tensor :r 2 :n-cycle n-cycle :kkt-tolerance 1d-4
+                                       :on-dead-component :ignore)
+        (declare (ignore factors iterations final-kl kl-history lambda))
+        (ok (or converged-p (>= residual 1d-4))
+            (format nil "n-cycle ~D: residual ~,4E and converged-p ~A agree"
+                    n-cycle residual converged-p))))))
+
+(deftest decomposition-inner-reports-bad-factors-end-to-end
+  "A NaN or infinite factor reaches the caller as NUMERICAL-INSTABILITY-ERROR.
+
+The checker is unit tested separately; this drives the whole optimizer, which is
+where an implementation's own floating-point condition could otherwise surface
+first."
+  (let* ((x-hat (make-array (length X-value-vector) :element-type 'double-float
+                                                    :initial-element 1d0)))
+    (multiple-value-bind (numerator denominator) (%make-workspace '(2 3 4) 2)
+      (let ((factors (make-array 3 :initial-contents
+                                 (loop for dim in '(2 3 4)
+                                       collect (make-array (list dim 2)
+                                                           :element-type 'double-float
+                                                           :initial-element 0.5d0)))))
+        (setf (aref (svref factors 1) 1 0) cltd:+double-float-positive-infinity+)
+        (ok (handler-case
+                (progn (cltd:decomposition-inner 3 X-indices-matrix X-value-vector x-hat
+                                                 factors numerator denominator
+                                                 :on-dead-component :ignore)
+                       nil)
+              (cltd:numerical-instability-error () t)
+              (error () nil))
+            "An infinite factor supplied by the caller signals the promised condition")))
+    (multiple-value-bind (numerator denominator) (%make-workspace '(2 3 4) 2)
+      (let ((factors (make-array 3 :initial-contents
+                                 (loop for dim in '(2 3 4)
+                                       collect (make-array (list dim 2)
+                                                           :element-type 'double-float
+                                                           :initial-element 1d0)))))
+        ;; Large enough that the multiplicative step overflows during the sweep.
+        (setf (aref (svref factors 0) 0 0) 1d308)
+        (setf (aref (svref factors 1) 0 0) 1d308)
+        (ok (handler-case
+                (progn (cltd:decomposition-inner 3 X-indices-matrix X-value-vector x-hat
+                                                 factors numerator denominator
+                                                 :on-dead-component :ignore)
+                       :no-error)
+              (cltd:numerical-instability-error () t)
+              (error () nil))
+            "An overflow produced during the sweep does not escape as a float condition")))))

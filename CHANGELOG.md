@@ -56,7 +56,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   one with the lowest final KL. Multiplicative updates only find a local optimum.
 
 - **Health checks that actually signal**: a NaN or infinite factor entry signals
-  `numerical-instability-error`, naming the mode, row and column.
+  `numerical-instability-error`, naming the mode, row and column. The factors are
+  scanned before the iteration starts and again after each sweep's updates, so a
+  bad value is reported before normalization divides by it and before `sdot` and
+  the loss carry it further; on SBCL the IEEE traps are masked across the
+  iteration so the library reports the offending entry instead of an
+  implementation floating-point condition.
   `:on-dead-component` handles a component whose weight collapses — `:warn`
   (default), `:error`, or `:ignore`. It defaults to warning rather than erroring
   because a dead component usually means the rank exceeds what the data supports,

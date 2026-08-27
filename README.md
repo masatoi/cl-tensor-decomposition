@@ -323,7 +323,9 @@ updated every mode and normalized the columns those numbers describe states that
 no longer exist. The free value therefore only acts as a screen. When it trips,
 and once more before returning, the residual is recomputed against the settled
 model; that is what convergence is decided on and what the seventh return value
-means.
+means. A run that exhausts `:n-cycle` on a model that already satisfies the
+tolerance reports `converged-p` true, because the settled residual — not the
+screen — has the last word.
 
 The older `:convergence-threshold` moving-average test still works and still
 stops the run, but it is weak on its own: averaging over a window dilutes the
@@ -354,7 +356,12 @@ predicted mass.
 with the lowest final KL.
 
 **Health checks.** A NaN or infinite factor entry signals
-`numerical-instability-error`. A component whose weight collapses is different —
+`numerical-instability-error`, naming the mode, row and column. The factors are
+scanned before the iteration starts and again after each sweep's updates, before
+normalization can divide by a bad value and before `sdot` and the loss carry it
+further. On SBCL the IEEE traps are masked across the iteration so the arithmetic
+produces the bad value instead of trapping on it, which is what lets the library
+report where it came from rather than surfacing an implementation condition. A component whose weight collapses is different —
 it usually just means the rank is larger than the data supports, which is what a
 rank sweep is looking for — so `:on-dead-component` chooses `:warn` (default),
 `:error`, or `:ignore`.
