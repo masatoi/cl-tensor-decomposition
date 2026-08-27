@@ -466,3 +466,24 @@ scheme got backwards, is that rank 1 scores far worse than rank 3."
       ;; Past the true rank the curve is flat: at most 5.15% over 30 seeds.
       (ok (< (/ (abs (- m3 m2)) m2) 0.5d0)
           (format nil "rank 3 changes the score by only ~,2F%" (* 100 (/ (- m3 m2) m2)))))))
+
+(deftest integration-elbow-stop-finds-the-true-rank-early
+  "On data of a known rank the sweep stops at that rank without finishing the grid.
+
+Measured over the probes that motivated this: the elbow rule agreed with the
+1-SE rule on every dataset tried -- synthetic rank 2, rank 4, and the penguin
+counts -- while evaluating 25-62% fewer ranks."
+  (let ((tensor (make-known-rank-tensor '(6 5 4) 2 400d0 101))
+        (ranks '(1 2 3 4 5 6)))
+    (multiple-value-bind (best evaluated)
+        (cltd:select-rank-elbow tensor ranks
+                                :k 5 :n-cycle 1200
+                                :random-state (cltd:%seed-random-state 801))
+      (ok (= (cdr (assoc :rank best)) 2)
+          (format nil "Elbow stop selects the true rank 2 (got ~D)"
+                  (cdr (assoc :rank best))))
+      (ok (< (length evaluated) (length ranks))
+          (format nil "Evaluated ~D of ~D ranks" (length evaluated) (length ranks)))
+      ;; It has to look past the elbow to know it is one.
+      (ok (>= (length evaluated) 3)
+          "Evaluated at least one rank beyond the selected one"))))

@@ -2895,3 +2895,85 @@ always, and fold sizes keep the spread a multinomial draw has."
   (ok (handler-case (progn (cltd:make-poisson-folds (%single-cell-tensor 2) 2) nil)
         (cltd:invalid-input-error () t))
       "k=2 with only 2 events is rejected: conditioning could return only the 1/1 split"))
+
+;;; ---------------------------------------------------------------------------
+;;; Elbow-based early stopping of the rank sweep
+;;; ---------------------------------------------------------------------------
+
+(deftest select-rank-elbow-stops-before-exhausting-the-grid
+  "The sweep walks ranks upward and stops once a rank stops paying for itself."
+  (let ((ranks '(1 2 3 4 5)))
+    (multiple-value-bind (best evaluated)
+        (cltd:select-rank-elbow CV-tensor ranks
+                                :k 3 :n-cycle 20
+                                :random-state (cltd:%seed-random-state 41))
+      (ok (< (length evaluated) (length ranks))
+          (format nil "Stopped after ~D of ~D ranks" (length evaluated) (length ranks)))
+      (ok (equal (mapcar (lambda (r) (cdr (assoc :rank r))) evaluated)
+                 (subseq ranks 0 (length evaluated)))
+          "Evaluated ranks are the ascending prefix of the grid")
+      (ok (member (cdr (assoc :rank best))
+                  (mapcar (lambda (r) (cdr (assoc :rank r))) evaluated))
+          "Selected rank is one of the ranks actually evaluated")
+      (dolist (key '(:rank :mean :std :standard-error :scores :validation-counts))
+        (ok (assoc key best) (format nil "Selected result has ~S key" key))))))
+
+(deftest select-rank-elbow-shares-folds-with-cross-validate-rank
+  "Per-rank scores match the whole-grid call, so the early stop loses nothing."
+  (let* ((ranks '(1 2 3))
+         (seed 41)
+         (whole (cltd:cross-validate-rank CV-tensor ranks
+                                          :k 3 :n-cycle 20
+                                          :random-state (cltd:%seed-random-state seed))))
+    (multiple-value-bind (best evaluated)
+        (cltd:select-rank-elbow CV-tensor ranks
+                                :k 3 :n-cycle 20 :patience 99
+                                :random-state (cltd:%seed-random-state seed))
+      (declare (ignore best))
+      (ok (equalp whole evaluated)
+          "With patience high enough to reach the end, results are identical"))))
+
+(deftest select-rank-elbow-patience-widens-the-sweep
+  "A larger PATIENCE never evaluates fewer ranks."
+  (let ((ranks '(1 2 3 4 5))
+        (previous 0))
+    (dolist (patience '(1 2 3))
+      (multiple-value-bind (best evaluated)
+          (cltd:select-rank-elbow CV-tensor ranks
+                                  :k 3 :n-cycle 20 :patience patience
+                                  :random-state (cltd:%seed-random-state 41))
+        (declare (ignore best))
+        (ok (>= (length evaluated) previous)
+            (format nil "patience ~D evaluated ~D ranks (>= ~D)"
+                    patience (length evaluated) previous))
+        (setf previous (length evaluated))))))
+
+(deftest select-rank-elbow-does-not-mutate-the-rank-list
+  "Sorting the candidates must not touch the caller's list."
+  (let* ((ranks (list 3 1 2))
+         (copy (copy-list ranks)))
+    (cltd:select-rank-elbow CV-tensor ranks
+                            :k 3 :n-cycle 20
+                            :random-state (cltd:%seed-random-state 41))
+    (ok (equal ranks copy)
+        (format nil "Caller's rank list is unchanged (~A)" ranks))))
+
+(deftest select-rank-elbow-is-quiet-unless-verbose
+  (let ((output (with-output-to-string (*standard-output*)
+                  (cltd:select-rank-elbow CV-tensor '(1 2 3)
+                                          :k 3 :n-cycle 10
+                                          :random-state (cltd:%seed-random-state 3)))))
+    (ok (zerop (length output))
+        (format nil "verbose=nil produces no output (got ~D characters)"
+                (length output)))))
+
+(deftest select-rank-elbow-rejects-invalid-input
+  (ok (handler-case (progn (cltd:select-rank-elbow CV-tensor '() :k 3) nil)
+        (cltd:invalid-input-error () t))
+      "Empty rank list is rejected")
+  (ok (handler-case (progn (cltd:select-rank-elbow CV-tensor '(1 2) :k 3 :patience 0) nil)
+        (cltd:invalid-input-error () t))
+      "patience 0 is rejected")
+  (ok (handler-case (progn (cltd:select-rank-elbow CV-tensor '(1 2) :k 3 :tolerance -1d0) nil)
+        (cltd:invalid-input-error () t))
+      "Negative tolerance is rejected"))

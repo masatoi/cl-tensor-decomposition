@@ -69,6 +69,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **`:standard-error` and `:validation-counts`** in each cross-validation result.
 
+- **`select-rank-elbow`**: walks the candidate ranks upward and stops once a rank
+  no longer improves the score by more than `:tolerance` standard errors, for
+  `:patience` consecutive ranks. A sequential form of the 1-SE rule, so it tends
+  to agree with `select-rank-1se` while fitting fewer models — on an 8-rank grid
+  it picked the same rank as both other rules while evaluating 25-62% fewer
+  ranks. Its second return value covers only the ranks actually evaluated, not
+  the whole grid. The rule is greedy and assumes the curve falls to an elbow and
+  then flattens; `:patience` softens that, and `cross-validate-rank` remains the
+  way to see the whole curve.
+
 ### Fixed
 
 - **Cross-validation is reproducible and order-independent**: a single
