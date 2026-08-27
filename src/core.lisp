@@ -626,7 +626,14 @@ into an explicit weight per component fixes that and makes the weight itself
 meaningful: LAMBDA-VECTOR[r] becomes the predicted mass of component r.
 
 A column that has collapsed to all zeros gets weight 0 and is left alone rather
-than divided by zero. Returns LAMBDA-VECTOR."
+than divided by zero.
+
+Signals NUMERICAL-INSTABILITY-ERROR when a column sum or an accumulated weight
+leaves the double range. Both are aggregates, so they can overflow while every
+entry feeding them is finite, which is precisely what the per-entry scan in
+%CHECK-FACTOR-VALUES cannot catch.
+
+Returns LAMBDA-VECTOR."
   (fill lambda-vector 1.0d0)
   (loop for mode from 0 below (length factor-matrix-vector)
         do (let ((matrix (svref factor-matrix-vector mode)))
@@ -635,10 +642,30 @@ than divided by zero. Returns LAMBDA-VECTOR."
                    do (let ((column-sum (loop for i from 0 below (array-dimension matrix 0)
                                               sum (aref matrix i ri)
                                               double-float)))
+                        ;; Entries that are each finite can still sum past the
+                        ;; double range. With the traps masked that yields an
+                        ;; infinity the per-entry scan cannot see, and dividing
+                        ;; by it turns the column into zeros whose weight is
+                        ;; infinite -- which then reaches the reconstruction and
+                        ;; the loss as an infinity or, where an entry normalized
+                        ;; to zero, a NaN. Stop at the aggregate instead.
+                        (when (or (%float-nan-p column-sum)
+                                  (%float-infinity-p column-sum))
+                          (error 'numerical-instability-error
+                                 :location (list :mode mode :column ri)
+                                 :value column-sum
+                                 :operation "factor column sum"))
                         (if (> column-sum 0.0d0)
-                            (progn
-                              (setf (aref lambda-vector ri)
-                                    (* (aref lambda-vector ri) column-sum))
+                            (let ((weight (* (aref lambda-vector ri) column-sum)))
+                              ;; The weight is a product across modes, so it can
+                              ;; overflow even when no single column sum does.
+                              (when (or (%float-nan-p weight)
+                                        (%float-infinity-p weight))
+                                (error 'numerical-instability-error
+                                       :location (list :component ri)
+                                       :value weight
+                                       :operation "component weight"))
+                              (setf (aref lambda-vector ri) weight)
                               (loop for i from 0 below (array-dimension matrix 0)
                                     do (setf (aref matrix i ri)
                                              (/ (aref matrix i ri) column-sum))))

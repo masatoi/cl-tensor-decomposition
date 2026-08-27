@@ -64,7 +64,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   bad value is reported before normalization divides by it and before `sdot` and
   the loss carry it further; on SBCL the IEEE traps are masked across the
   iteration so the library reports the offending entry instead of an
-  implementation floating-point condition.
+  implementation floating-point condition. Aggregates are checked separately: a
+  column sum or a component weight can overflow while every entry feeding it is
+  finite, so normalization signals on those too rather than dividing by an
+  infinity.
   `:on-dead-component` handles a component whose weight collapses — `:warn`
   (default), `:error`, or `:ignore`. It defaults to warning rather than erroring
   because a dead component usually means the rank exceeds what the data supports,

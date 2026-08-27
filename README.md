@@ -363,7 +363,13 @@ scanned before the iteration starts and again after each sweep's updates, before
 normalization can divide by a bad value and before `sdot` and the loss carry it
 further. On SBCL the IEEE traps are masked across the iteration so the arithmetic
 produces the bad value instead of trapping on it, which is what lets the library
-report where it came from rather than surfacing an implementation condition. A component whose weight collapses is different —
+report where it came from rather than surfacing an implementation condition.
+
+Aggregates get their own check, because entries that are each finite can still
+sum or multiply past the double range: a column sum or a component weight that
+leaves it signals `numerical-instability-error` naming the column or the
+component, rather than dividing by an infinity and sending zeros and NaNs on
+into the reconstruction. A component whose weight collapses is different —
 it usually just means the rank is larger than the data supports, which is what a
 rank sweep is looking for — so `:on-dead-component` chooses `:warn` (default),
 `:error`, or `:ignore`.

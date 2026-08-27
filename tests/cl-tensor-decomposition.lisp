@@ -3383,3 +3383,51 @@ vector of all ones and a final KL of 0."
     (ok (handler-case (progn (cltd:decomposition X-tensor :r 2 :n-cycle n-cycle) nil)
           (cltd:invalid-input-error () t))
         (format nil ":n-cycle ~S is rejected" n-cycle))))
+
+(deftest normalize-factors-reports-an-overflowing-column-sum
+  "Finite entries can still sum past the double range.
+
+Inside the optimizer the IEEE traps are masked so the library can report where a
+bad value came from, which means an overflowing column sum yields infinity
+rather than trapping. Every entry is finite on its own, so the entry scan passes
+and the weight went infinite, then travelled through the reconstruction and the
+loss before anything looked again."
+  (cltd::%with-float-traps-masked
+   (let ((factors (make-array 2 :initial-contents
+                              (list (make-array '(2 1) :element-type 'double-float
+                                                       :initial-contents '((1d0) (1d0)))
+                                    (make-array '(2 1) :element-type 'double-float
+                                                       :initial-contents '((1d308) (1d308))))))
+         (lambda-vector (make-array 1 :element-type 'double-float :initial-element 1d0)))
+     (ok (null (cltd::%check-factor-values factors))
+         "Each entry on its own is finite, so the entry scan passes")
+     (ok (handler-case (progn (cltd::%normalize-factors factors lambda-vector) nil)
+           (cltd:numerical-instability-error (condition)
+             (and (equal (cltd:instability-location condition) '(:mode 1 :column 0))
+                  (cltd:%float-infinity-p (cltd:instability-value condition)))))
+         "The overflowing column sum is reported, naming the mode and column"))))
+
+(deftest normalize-factors-reports-an-overflowing-weight
+  "A component weight can overflow across modes even when no column sum does."
+  (cltd::%with-float-traps-masked
+   (let ((factors (make-array 2 :initial-contents
+                              (list (make-array '(1 1) :element-type 'double-float
+                                                       :initial-contents '((1d200)))
+                                    (make-array '(1 1) :element-type 'double-float
+                                                       :initial-contents '((1d200))))))
+         (lambda-vector (make-array 1 :element-type 'double-float :initial-element 1d0)))
+     (ok (handler-case (progn (cltd::%normalize-factors factors lambda-vector) nil)
+           (cltd:numerical-instability-error (condition)
+             (equal (cltd:instability-location condition) '(:component 0))))
+         "The accumulated weight overflow is reported, naming the component")))
+  (cltd::%with-float-traps-masked
+   (let ((factors (make-array 2 :initial-contents
+                              (list (make-array '(2 1) :element-type 'double-float
+                                                       :initial-contents '((2d0) (3d0)))
+                                    (make-array '(2 1) :element-type 'double-float
+                                                       :initial-contents '((1d0) (4d0))))))
+         (lambda-vector (make-array 1 :element-type 'double-float :initial-element 1d0)))
+     (cltd::%normalize-factors factors lambda-vector)
+     (ok (< (abs (- (aref lambda-vector 0) 25d0)) 1d-9)
+         (format nil "Ordinary factors still normalize (weight ~,4F = 5 * 5)"
+                 (aref lambda-vector 0))))))
