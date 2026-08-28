@@ -3558,3 +3558,97 @@ returned residual and the number convergence is decided on."
                                                           :on-dead-component :ignore))))))
     (ok (search (format nil "kkt-residual ~,3E" residual) output)
         (format nil "The closing line reports the returned residual (~,3E)" residual))))
+
+(deftest kkt-stopping-does-not-depend-on-the-scale-of-the-counts
+  "The residual must be dimensionless, or a fixed tolerance means nothing.
+
+The gradient denominator(r) - numerator(i,r) carries the units of the data, so
+the same relative distance from a solution reported a proportionally larger
+number on a tensor with larger counts. A tensor scaled by 100 then never tripped
+the tolerance and burned the whole budget for a fit that was already done."
+  (flet ((scaled (factor)
+           (cltd:make-sparse-tensor
+            '(2 3 4)
+            (make-array '(3 3) :element-type 'fixnum
+                        :initial-contents '((0 1 0) (1 2 3) (0 0 1)))
+            (make-array 3 :element-type 'double-float
+                        :initial-contents (list (* 1d0 factor) (* 2d0 factor)
+                                                (* 3d0 factor))))))
+    (let ((iterations '())
+          (residuals '()))
+      (dolist (factor '(1 100 10000))
+        (let ((*random-state* (cltd:%seed-random-state 20260827)))
+          (multiple-value-bind (f i kl h c lambda residual)
+              (cltd:decomposition (scaled factor) :r 2 :n-cycle 500
+                                                  :on-dead-component :ignore)
+            (declare (ignore f kl h c lambda))
+            (push i iterations)
+            (push residual residuals))))
+      ;; A sweep or two of difference is ordinary; the failure this guards is a
+      ;; run that stops in single digits at one scale and exhausts 500 at another.
+      (ok (every (lambda (i) (< i 20)) iterations)
+          (format nil "Counts scaled by 1, 100 and 10000 all stop early (~A of 500)"
+                  iterations))
+      (ok (<= (- (reduce #'max iterations) (reduce #'min iterations)) 3)
+          (format nil "The iteration counts stay within a few of each other (~A)"
+                  iterations))
+      (ok (every (lambda (r) (< r 1d-4)) residuals)
+          (format nil "Every residual is below the tolerance (~{~,3E ~})" residuals)))))
+
+(deftest decomposition-rejects-an-unsatisfiable-kkt-tolerance
+  "A tolerance at or below *epsilon* can never be met, so it is refused.
+
+CALC-NUMERATOR divides by x^ + *epsilon*, which biases the gradient by about
+*epsilon*; the residual bottoms out there. Accepting a tighter tolerance would
+silently promise a run that always reports non-convergence."
+  (dolist (tolerance (list cltd::*epsilon* (/ cltd::*epsilon* 100)))
+    (ok (handler-case (progn (cltd:decomposition X-tensor :r 2 :n-cycle 5
+                                                          :kkt-tolerance tolerance)
+                             nil)
+          (cltd:invalid-input-error () t))
+        (format nil "kkt-tolerance ~,2E is rejected as unsatisfiable" tolerance)))
+  (ok (handler-case (progn (cltd:decomposition X-tensor :r 2 :n-cycle 5
+                                                        :kkt-tolerance 0
+                                                        :on-dead-component :ignore)
+                           t)
+        (error () nil))
+      "Zero still means 'run the whole budget' and is accepted"))
+
+(deftest normalize-factors-leaves-the-factors-alone-when-it-signals
+  "A failed normalization must not leave a half-normalized model behind.
+
+The guards fire partway through, after earlier modes have already been divided
+by their column sums, so a caller that handles the condition and looks at the
+factors it passed in would see a state the optimizer never visited."
+  (cltd::%with-float-traps-masked
+   (let* ((mode0 (make-array '(2 1) :element-type 'double-float
+                             :initial-contents '((2d0) (3d0))))
+          (mode1 (make-array '(2 1) :element-type 'double-float
+                             :initial-contents '((1d308) (1d308))))
+          (factors (make-array 2 :initial-contents (list mode0 mode1)))
+          (lambda-vector (make-array 1 :element-type 'double-float :initial-element 1d0)))
+     (ok (handler-case (progn (cltd::%normalize-factors factors lambda-vector) nil)
+           (cltd:numerical-instability-error () t))
+         "The overflowing column is still reported")
+     (ok (and (= (aref mode0 0 0) 2d0) (= (aref mode0 1 0) 3d0))
+         (format nil "Mode 0 is untouched (~,1F ~,1F), not divided by its column sum"
+                 (aref mode0 0 0) (aref mode0 1 0))))))
+
+(deftest dead-component-threshold-is-a-share-of-the-model
+  "The cutoff is a fraction of the total mass, not an absolute weight."
+  (let ((factors (make-array 1 :initial-contents
+                             (list (make-array '(2 2) :element-type 'double-float
+                                                      :initial-element 0.5d0)))))
+    ;; Small in absolute terms but half the model: alive.
+    (ok (null (handler-bind ((warning #'muffle-warning))
+                (cltd::%check-factor-health
+                 factors (make-array 2 :element-type 'double-float
+                                       :initial-contents '(1d-12 1d-12)))))
+        "A tiny weight holding half the mass is not dead")
+    ;; Large in absolute terms but a negligible share: dead.
+    (ok (equal (handler-bind ((warning #'muffle-warning))
+                 (cltd::%check-factor-health
+                  factors (make-array 2 :element-type 'double-float
+                                        :initial-contents '(1d12 1d0))))
+               '(1))
+        "A weight of 1 against 1d12 is a negligible share, so it is dead")))

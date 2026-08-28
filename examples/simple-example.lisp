@@ -35,11 +35,12 @@
 The factor matrices are seeded at random, so the exact numbers differ per run.
 One representative run:
 
-iteration: 1, kl-divergence: 8.224610189606516d0, kkt-residual: 3.463d+0
-iteration: 2, kl-divergence: 4.664015746706738d0, kkt-residual: 1.851d+0
-iteration: 3, kl-divergence: 2.355426500948277d0, kkt-residual: 8.964d-1
-iteration: 4, kl-divergence: 2.249334277028649d0, kkt-residual: 9.448d-2
-iteration: 5, kl-divergence: 2.2493342451375336d0, kkt-residual: 4.010d-6
+iteration: 1, kl-divergence: 8.224610189606516d0, kkt-screen: 2.225d+0
+iteration: 2, kl-divergence: 4.664015746706738d0, kkt-screen: 7.337d-1
+iteration: 3, kl-divergence: 2.355426500948277d0, kkt-screen: 8.964d-1
+iteration: 4, kl-divergence: 2.249334277028649d0, kkt-screen: 9.448d-2
+iteration: 5, kl-divergence: 2.2493342451375336d0, kkt-screen: 7.524d-7
+final: iterations 5, kl-divergence 2.2493342451375336d0, kkt-residual 7.500d-7, converged T
 
 #(#2A((3.9999936666558518d0 1.443397262487504d-48)
       (1.042843956499246d-274 1.9999979999995001d0))
@@ -52,7 +53,12 @@ iteration: 5, kl-divergence: 2.2493342451375336d0, kkt-residual: 4.010d-6
       (0.0d0 1.0d0)))
 
 It stopped after 5 of the 10 allowed iterations because the KKT residual fell
-below the default tolerance of 1d-4 -- the run had reached a stationary point.
+below the default tolerance of 1d-4.
+
+The per-iteration line reports KKT-SCREEN, the value a sweep sees for free before
+each mode's own update. The closing line reports the settled residual, measured
+against the finished model, which is what convergence is decided on and what
+DECOMPOSITION returns as its seventh value.
 
 One iteration is a full sweep over all three modes. Modes 1 and 2 come back with
 unit-sum columns and mode 0 carries the component weights, which DECOMPOSITION

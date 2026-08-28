@@ -31,7 +31,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **KKT-based convergence**: the run stops when `max |min(A, gradient)|` falls
   below `:kkt-tolerance` (default `1d-4`), which is zero exactly at a stationary
-  point of the non-negativity constrained problem. Pass `0` to disable. A sweep
+  point of the non-negativity constrained problem. Pass `0` to disable. The
+  gradient is scaled by the denominator, `1 - numerator/denominator`, matching
+  the form Chi & Kolda's `E - Phi` takes for normalized factors; without that
+  scaling the residual carries the units of the data and a tensor with larger
+  counts never trips a fixed tolerance. The residual cannot go below about
+  `*epsilon*`, so a positive tolerance at or under that is refused rather than
+  silently never met. A sweep
   observes the residual for free, but each mode reports what it saw on entry, so
   that value is used only as a screen; the residual convergence is decided on,
   and that comes back as the seventh return value, is recomputed against the
@@ -73,7 +79,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   could otherwise select it. The residual is computed after the loop but under the same trap mask,
   since it divides observed counts by the reconstruction.
   `:on-dead-component` handles a component whose weight collapses — `:warn`
-  (default), `:error`, or `:ignore`. It defaults to warning rather than erroring
+  (default), `:error`, or `:ignore`. `:dead-component-threshold` is a fraction of
+  the total predicted mass rather than an absolute weight, since the weights
+  carry the units of the data. Normalization validates every aggregate before
+  touching a factor, so a signal leaves the caller's matrices untouched rather
+  than half-normalized. It defaults to warning rather than erroring
   because a dead component usually means the rank exceeds what the data supports,
   which is exactly what a rank sweep is looking for; erroring would break
   `select-rank`.

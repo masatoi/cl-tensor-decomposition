@@ -491,6 +491,14 @@ respect to A(i,r) is denominator(r) - numerator(i,r): the first term is how much
 extra predicted mass the entry buys, the second how much observed count it
 explains.
 
+That difference carries the units of the data, so on a tensor with larger counts
+the same relative distance from a solution reports a proportionally larger
+number, and a fixed tolerance stops meaning the same thing. The gradient is
+therefore scaled by the denominator, giving 1 - numerator/denominator, which is
+the form Chi and Kolda's E - Phi takes when the factors are normalized. The sign
+is unchanged, so the multiplicative step and the inadmissible-zero test still
+read it the same way.
+
 Inadmissible zeros: a plain multiplicative update can never revive an entry that
 has reached zero, because the step is a product. When such an entry has a
 negative gradient it wants to grow, and the fit converges to a point that is not
@@ -531,7 +539,10 @@ overshoots slightly on the iteration that revives it and settles on the next."
                    do (let* ((value (aref factor-matrix i ri))
                              (numerator (aref numerator-tmp-elem i ri))
                              (denominator (aref denominator-tmp factor-index ri))
-                             (gradient (- denominator numerator)))
+                             (gradient (- 1.0d0
+                                          (/ numerator
+                                             (+ denominator
+                                                (the double-float *epsilon*))))))
                         (declare (type double-float value numerator denominator gradient))
                         (setf residual (max residual (abs (min value gradient))))
                         (when (and allow-scooch
@@ -619,8 +630,10 @@ every iteration."
                               do (setf residual
                                        (max residual
                                             (abs (min (aref factor-matrix i ri)
-                                                      (- (aref denominator-tmp mode ri)
-                                                         (aref numerator-tmp-elem i ri))))))))))
+                                                      (- 1.0d0
+                                                         (/ (aref numerator-tmp-elem i ri)
+                                                            (+ (aref denominator-tmp mode ri)
+                                                               (the double-float *epsilon*))))))))))))
     residual))
 
 (defun %copy-factor-matrices (factor-matrix-vector)
@@ -648,9 +661,16 @@ than divided by zero.
 Signals NUMERICAL-INSTABILITY-ERROR when a column sum or an accumulated weight
 leaves the double range. Both are aggregates, so they can overflow while every
 entry feeding them is finite, which is precisely what the per-entry scan in
-%CHECK-FACTOR-VALUES cannot catch.
+%CHECK-FACTOR-VALUES cannot catch. Validation runs to completion before any
+factor is touched, so a signal leaves FACTOR-MATRIX-VECTOR exactly as it was.
 
 Returns LAMBDA-VECTOR."
+  ;; Two passes on purpose. The guards below can fire on any mode, and dividing
+  ;; as we go would leave the caller's factors half-normalized -- a state the
+  ;; optimizer never visited -- for anyone who handles the condition and then
+  ;; looks at them. So validate every aggregate first, mutate only once nothing
+  ;; can fail. The extra traversal is over the factors, which are small beside
+  ;; the O(nnz * R * n-modes) work of a sweep.
   (fill lambda-vector 1.0d0)
   (loop for mode from 0 below (length factor-matrix-vector)
         do (let ((matrix (svref factor-matrix-vector mode)))
@@ -682,11 +702,20 @@ Returns LAMBDA-VECTOR."
                                        :location (list :component ri)
                                        :value weight
                                        :operation "component weight"))
-                              (setf (aref lambda-vector ri) weight)
-                              (loop for i from 0 below (array-dimension matrix 0)
-                                    do (setf (aref matrix i ri)
-                                             (/ (aref matrix i ri) column-sum))))
+                              (setf (aref lambda-vector ri) weight))
                             (setf (aref lambda-vector ri) 0.0d0))))))
+  ;; Nothing above can signal any more, so the factors can be rewritten.
+  (loop for mode from 0 below (length factor-matrix-vector)
+        do (let ((matrix (svref factor-matrix-vector mode)))
+             (declare (type (simple-array double-float) matrix))
+             (loop for ri from 0 below (array-dimension matrix 1)
+                   do (let ((column-sum (loop for i from 0 below (array-dimension matrix 0)
+                                              sum (aref matrix i ri)
+                                              double-float)))
+                        (when (> column-sum 0.0d0)
+                          (loop for i from 0 below (array-dimension matrix 0)
+                                do (setf (aref matrix i ri)
+                                         (/ (aref matrix i ri) column-sum))))))))
   lambda-vector)
 
 (defun %absorb-lambda (factor-matrix-vector lambda-vector)
@@ -754,16 +783,30 @@ there would break SELECT-RANK, so ON-DEAD-COMPONENT chooses:
   :error  signal NUMERICAL-INSTABILITY-ERROR
   :ignore say nothing
 
+DEAD-COMPONENT-THRESHOLD is a *fraction of the total predicted mass*, not an
+absolute weight. The weights carry the units of the data, so an absolute cutoff
+would mean something different on every tensor and would effectively never fire
+on one with large counts.
+
 Returns the list of dead component indices."
   (%check-factor-values factor-matrix-vector)
-  (let ((dead (loop for ri from 0 below (length lambda-vector)
-                    when (< (aref lambda-vector ri) dead-component-threshold)
-                      collect ri)))
+  (let* ((total-mass (loop for ri from 0 below (length lambda-vector)
+                          sum (aref lambda-vector ri)
+                          double-float))
+         ;; The weights carry the units of the data, so an absolute threshold
+         ;; means something different on every tensor and effectively never fires
+         ;; on one with large counts. What "dead" means is a component holding a
+         ;; negligible *share* of the model, so the test is a fraction.
+         (dead (loop for ri from 0 below (length lambda-vector)
+                     when (or (not (plusp total-mass))
+                              (< (/ (aref lambda-vector ri) total-mass)
+                                 dead-component-threshold))
+                       collect ri)))
     (when dead
       (ecase on-dead-component
         (:ignore nil)
-        (:warn (warn "~D of ~D components collapsed to zero weight (below ~,2E): ~{~D~^, ~}. ~
-The data may not support this rank."
+        (:warn (warn "~D of ~D components hold a negligible share of the model ~
+(below ~,2E of the total mass): ~{~D~^, ~}. The data may not support this rank."
                      (length dead) (length lambda-vector)
                      dead-component-threshold dead))
         (:error (error 'numerical-instability-error
@@ -1032,7 +1075,9 @@ VERBOSE       - when true, emit per-iteration logs; defaults to NIL. The
 CONVERGENCE-THRESHOLD - optional relative tolerance for the moving-average test.
 CONVERGENCE-WINDOW    - smoothing window length; defaults to 5.
 KKT-TOLERANCE - stop once the largest KKT violation falls below this; defaults
-                to 1d-4 as in Chi and Kolda. Pass 0 to run the full budget.
+                to 1d-4 as in Chi and Kolda. Pass 0 to run the full budget. The
+                residual cannot go below about *epsilon*, so a positive tolerance
+                at or under that is refused rather than silently never met.
 KAPPA, KAPPA-TOLERANCE - inadmissible-zero handling; see UPDATE.
 N-STARTS      - how many random initializations to try, keeping the one with the
                 lowest final KL; defaults to 1. Multiplicative updates only find
@@ -1064,6 +1109,17 @@ NUMERICAL-INSTABILITY-ERROR if the fit produces NaN or infinite factors."
     (error 'invalid-input-error
            :reason :invalid-iteration-budget
            :details (format nil "n-cycle must be a non-negative integer, got ~S" n-cycle)))
+  ;; CALC-NUMERATOR divides by x^ + *epsilon*, which biases the gradient by about
+  ;; *epsilon*, so the residual bottoms out there. Accepting a tighter tolerance
+  ;; would promise a stop that can never happen; 0 remains the way to ask for the
+  ;; whole budget.
+  (let ((limit (coerce kkt-tolerance 'double-float)))
+    (when (and (plusp limit) (<= limit *epsilon*))
+      (error 'invalid-input-error
+             :reason :unsatisfiable-kkt-tolerance
+             :details (format nil "kkt-tolerance ~,3E is at or below *epsilon* (~,3E), ~
+which the residual cannot go under; use a larger tolerance, or 0 to run the full budget"
+                              limit *epsilon*))))
   (setf kappa (coerce kappa 'double-float))
   (setf kappa-tolerance (coerce kappa-tolerance 'double-float))
   (let* ((x-shape (sparse-tensor-shape tensor))

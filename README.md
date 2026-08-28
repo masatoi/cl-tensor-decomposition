@@ -40,11 +40,12 @@ ros install masatoi/cl-tensor-decomposition
 (decomposition *tensor* :n-cycle 10 :r 2 :verbose t)
 
 #|
-iteration: 1, kl-divergence: 8.224610, kkt-residual: 3.463d+0
-iteration: 2, kl-divergence: 4.664016, kkt-residual: 1.851d+0
-iteration: 3, kl-divergence: 2.355427, kkt-residual: 8.964d-1
-iteration: 4, kl-divergence: 2.249334, kkt-residual: 9.448d-2
-iteration: 5, kl-divergence: 2.249334, kkt-residual: 4.010d-6
+iteration: 1, kl-divergence: 8.224610, kkt-screen: 2.225d+0
+iteration: 2, kl-divergence: 4.664016, kkt-screen: 7.337d-1
+iteration: 3, kl-divergence: 2.355427, kkt-screen: 8.964d-1
+iteration: 4, kl-divergence: 2.249334, kkt-screen: 9.448d-2
+iteration: 5, kl-divergence: 2.249334, kkt-screen: 7.524d-7
+final: iterations 5, kl-divergence 2.249334, kkt-residual 7.500d-7, converged T
 
 ;; stopped after 5 of 10 allowed iterations: the KKT residual reached 1d-4
 #(#2A((3.99999 0.00000) (0.00000 1.99999))
@@ -319,6 +320,18 @@ gradient of the generalized KL with respect to `A(i,r)` is
 `:kkt-tolerance` (default `1d-4`, following Chi & Kolda); pass `0` to disable it
 and use the whole budget.
 
+The gradient is scaled by the denominator, `1 - numerator/denominator`, which is
+the form Chi & Kolda's `E - Phi` takes when the factors are normalized. Without
+that the residual would carry the units of the data: the same relative distance
+from a solution would report a proportionally larger number on a tensor with
+larger counts, and a fixed tolerance would stop meaning the same thing — a tensor
+scaled by 100 would never trip it and would burn its whole budget on a fit that
+was already done.
+
+The residual cannot go below about `*epsilon*`, since `calc-numerator` divides by
+`x^ + *epsilon*`. A positive `:kkt-tolerance` at or under that is refused rather
+than silently never met; `0` remains the way to ask for the full budget.
+
 A sweep observes that residual for free, since each update already has the
 gradients — but each mode reports what it saw **on entry**, so once the sweep has
 updated every mode and normalized the columns those numbers describe states that
@@ -383,7 +396,9 @@ be represented reflects data whose model mass overflows, and a different
 initialization does not change that. A component whose weight collapses is different —
 it usually just means the rank is larger than the data supports, which is what a
 rank sweep is looking for — so `:on-dead-component` chooses `:warn` (default),
-`:error`, or `:ignore`.
+`:error`, or `:ignore`. `:dead-component-threshold` is a **fraction of the total
+predicted mass**, not an absolute weight — the weights carry the units of the
+data, so an absolute cutoff would mean something different on every tensor.
 
 ```lisp
 (multiple-value-bind (factors iterations final-kl kl-history converged-p
