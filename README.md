@@ -40,13 +40,17 @@ ros install masatoi/cl-tensor-decomposition
 (decomposition *tensor* :n-cycle 10 :r 2 :verbose t)
 
 #|
-cycle: 1, kl-divergence: 13.444468
-cycle: 2, kl-divergence: 12.223802
-...
-cycle: 10, kl-divergence: 2.2586484
-#(#2A((0.0 1.289) (0.734 0.0))
-  #2A((0.0 1.333) (0.0 0.444) (1.719 0.0))
-  #2A((0.0 0.436) (0.0 1.309) (0.0 0.0) (1.585 0.0)))
+iteration: 1, kl-divergence: 8.224610, kkt-screen: 2.225d+0
+iteration: 2, kl-divergence: 4.664016, kkt-screen: 7.337d-1
+iteration: 3, kl-divergence: 2.355427, kkt-screen: 8.964d-1
+iteration: 4, kl-divergence: 2.249334, kkt-screen: 9.448d-2
+iteration: 5, kl-divergence: 2.249334, kkt-screen: 7.524d-7
+final: iterations 5, kl-divergence 2.249334, kkt-residual 7.500d-7, converged T
+
+;; stopped after 5 of 10 allowed iterations: the KKT residual reached 1d-4
+#(#2A((3.99999 0.00000) (0.00000 1.99999))
+  #2A((0.75000 0.00000) (0.25000 0.00000) (0.00000 1.00000))
+  #2A((0.25000 0.00000) (0.75000 0.00000) (0.00000 0.00000) (0.00000 1.00000)))
 |#
 ```
 
@@ -294,6 +298,116 @@ A coordinate that is absent from the index matrix is an **observed zero**, not a
 missing value. There is no observation mask: the tensor is dense in meaning and
 sparse only in storage.
 
+### The optimizer
+
+One `:n-cycle` is a **full sweep**: every mode is updated once, with the
+reconstruction refreshed between modes. It used to count single-mode updates, so
+the same number now does as much work as there are modes — a `:n-cycle 100` on a
+3-mode tensor is 300 mode updates, not 100. It must be a non-negative integer;
+`0` runs no updates but still returns the initial model in the representation
+described below, with normalized columns, real weights and a real loss.
+
+**Convergence** is decided by the KKT residual, not only by the loss curve. At a
+solution of the non-negativity constrained problem every factor entry satisfies
+
+```
+A >= 0        gradient >= 0        A * gradient = 0
+```
+
+so `max |min(A, gradient)|` is zero exactly at a stationary point, where the
+gradient of the generalized KL with respect to `A(i,r)` is
+`denominator(r) - numerator(i,r)`. The run stops when that falls below
+`:kkt-tolerance` (default `1d-4`, following Chi & Kolda); pass `0` to disable it
+and use the whole budget.
+
+The gradient is scaled by the denominator, `1 - numerator/denominator`, which is
+the form Chi & Kolda's `E - Phi` takes when the factors are normalized. Without
+that the residual would carry the units of the data: the same relative distance
+from a solution would report a proportionally larger number on a tensor with
+larger counts, and a fixed tolerance would stop meaning the same thing — a tensor
+scaled by 100 would never trip it and would burn its whole budget on a fit that
+was already done.
+
+The residual cannot go below about `*epsilon*`, since `calc-numerator` divides by
+`x^ + *epsilon*`. A positive `:kkt-tolerance` at or under that is refused rather
+than silently never met; `0` remains the way to ask for the full budget.
+
+A sweep observes that residual for free, since each update already has the
+gradients — but each mode reports what it saw **on entry**, so once the sweep has
+updated every mode and normalized the columns those numbers describe states that
+no longer exist. The free value therefore only acts as a screen. When it trips,
+and once more before returning, the residual is recomputed against the settled
+model; that is what convergence is decided on and what the seventh return value
+means. A run that exhausts `:n-cycle` on a model that already satisfies the
+tolerance reports `converged-p` true, because the settled residual — not the
+screen — has the last word.
+
+The older `:convergence-threshold` moving-average test still works and still
+stops the run, but it is weak on its own: averaging over a window dilutes the
+step-to-step change, so a larger `:convergence-window` reports convergence
+sooner — including on runs that have not converged.
+
+**Inadmissible zeros.** A multiplicative step is a product, so an entry that
+reaches zero can never come back, and the fit can stall at a point that is not
+KKT. Following [Chi & Kolda](https://arxiv.org/abs/1112.2414), an entry that is
+pinned at zero (below `:kappa-tolerance`) while its gradient is negative — it
+wants to grow — is nudged to `:kappa` (default `1d-2`) before the step. The
+first sweep runs without this, matching their `k > 1` condition.
+
+This fixes a single pinned entry. A *coordinated* collapse, where the matching
+entries in several modes are zero together, is a genuine boundary stationary
+point rather than a missed fix — a poor local optimum, which is what `:n-starts`
+is for.
+
+**Normalization and component weights.** After each sweep the columns are scaled
+to unit sum and the scale collected into an explicit weight per component, then
+folded back into mode 0. So the returned factors have unit-sum columns in every
+mode past the first, mode 0 carries the weights, and `sdot` still reads them
+directly. The weights come back as the sixth return value and sum to the total
+predicted mass.
+
+**Multiple starts.** Multiplicative updates only find a local optimum.
+`:n-starts` (default 1) runs that many random initializations and keeps the one
+with the lowest final KL.
+
+**Health checks.** A NaN or infinite factor entry signals
+`numerical-instability-error`, naming the mode, row and column. The factors are
+scanned before the iteration starts and again after each sweep's updates, before
+normalization can divide by a bad value and before `sdot` and the loss carry it
+further. On SBCL the IEEE traps are masked across the iteration so the arithmetic
+produces the bad value instead of trapping on it, which is what lets the library
+report where it came from rather than surfacing an implementation condition.
+
+Aggregates get their own check, because entries that are each finite can still
+sum or multiply past the double range: a column sum, a component weight, the KKT
+residual, or the loss. Each signals `numerical-instability-error` naming what
+overflowed, rather than dividing by an infinity and sending zeros and NaNs on
+into the reconstruction. The residual is computed after the loop but under the
+same trap mask, since it divides observed counts by the reconstruction and can
+overflow on exactly the inputs the sweep can.
+
+The loss needs its own check even though everything feeding it is checked: it is
+the sum of the local term and the total predicted mass, and those can overflow to
+opposite infinities while every factor entry, every reconstruction and the KKT
+residual stay finite. Their sum is then a NaN — which also poisons every
+comparison it enters, so an unusable fit could otherwise be picked by `:n-starts`
+and returned as the answer. `:n-starts` does not rescue this: a loss that cannot
+be represented reflects data whose model mass overflows, and a different
+initialization does not change that. A component whose weight collapses is different —
+it usually just means the rank is larger than the data supports, which is what a
+rank sweep is looking for — so `:on-dead-component` chooses `:warn` (default),
+`:error`, or `:ignore`. `:dead-component-threshold` is a **fraction of the total
+predicted mass**, not an absolute weight — the weights carry the units of the
+data, so an absolute cutoff would mean something different on every tensor.
+
+```lisp
+(multiple-value-bind (factors iterations final-kl kl-history converged-p
+                      lambda kkt-residual)
+    (decomposition *tensor* :r 5 :n-cycle 200 :n-starts 4)
+  (format t "~a iterations, KL ~,4f, KKT ~,3e, weights ~a~%"
+          iterations final-kl kkt-residual lambda))
+```
+
 ### Objective function
 
 `decomposition` minimises the generalized (Poisson) KL divergence between the
@@ -336,6 +450,10 @@ and validation halves.
 
 The logarithm divides by `x^ + *epsilon*` so an underflowed reconstruction
 cannot yield `-infinity`; `*epsilon*` is not added to the total predicted mass.
+
+`:kappa`, `:kappa-tolerance` and `:kkt-tolerance` accept any real — they are
+coerced to double-float at the API boundary — so `:kappa 0` disables the
+inadmissible-zero fix without ceremony.
 
 ## Reference
 

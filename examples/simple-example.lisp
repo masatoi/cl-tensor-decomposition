@@ -35,28 +35,38 @@
 The factor matrices are seeded at random, so the exact numbers differ per run.
 One representative run:
 
-cycle: 1, kl-divergence: 12.375458236469434d0
-cycle: 2, kl-divergence: 11.421030593767115d0
-cycle: 3, kl-divergence: 7.654746677336834d0
-cycle: 4, kl-divergence: 6.453010665196585d0
-cycle: 5, kl-divergence: 4.747575186549028d0
-cycle: 6, kl-divergence: 3.3759113009724446d0
-cycle: 7, kl-divergence: 2.6266314340873818d0
-cycle: 8, kl-divergence: 2.3132773887178866d0
-cycle: 9, kl-divergence: 2.252722740899359d0
-cycle: 10, kl-divergence: 2.24935167963779d0
+iteration: 1, kl-divergence: 8.224610189606516d0, kkt-screen: 2.225d+0
+iteration: 2, kl-divergence: 4.664015746706738d0, kkt-screen: 7.337d-1
+iteration: 3, kl-divergence: 2.355426500948277d0, kkt-screen: 8.964d-1
+iteration: 4, kl-divergence: 2.249334277028649d0, kkt-screen: 9.448d-2
+iteration: 5, kl-divergence: 2.2493342451375336d0, kkt-screen: 7.524d-7
+final: iterations 5, kl-divergence 2.2493342451375336d0, kkt-residual 7.500d-7, converged T
 
-#(#2A((0.8126999087904875d0 2.5362270002205497d-17)
-      (1.4069910221524954d-98 1.1019555649412494d0))
-  #2A((2.0993123211737923d0 4.282613598770222d-6)
-      (0.6997614730501149d0 8.21300213668385d-6)
-      (3.844096552359546d-29 1.433543101446069d0))
-  #2A((0.43959586016845853d0 7.33015268400767d-10)
-      (1.3187923563143393d0 1.2654007348018188d-10)
+#(#2A((3.9999936666558518d0 1.443397262487504d-48)
+      (1.042843956499246d-274 1.9999979999995001d0))
+  #2A((0.7500006666702905d0 3.266427031620839d-89)
+      (0.24999933332970933d0 1.0442453827305826d-186)
+      (0.0d0 1.0d0))
+  #2A((0.24999933333020377d0 7.707424075123446d-321)
+      (0.7500006666697963d0 1.9823628043681258d-163)
       (0.0d0 0.0d0)
-      (1.2942686901905257d-53 1.2660501686271945d0)))
+      (0.0d0 1.0d0)))
 
-The reported divergence is the generalized KL over *every* coordinate, so it
-includes the predicted mass on the 21 implicit zeros of this 2x3x4 tensor, not
-just the 3 stored non-zeros.
+It stopped after 5 of the 10 allowed iterations because the KKT residual fell
+below the default tolerance of 1d-4.
+
+The per-iteration line reports KKT-SCREEN, the value a sweep sees for free before
+each mode's own update. The closing line reports the settled residual, measured
+against the finished model, which is what convergence is decided on and what
+DECOMPOSITION returns as its seventh value.
+
+One iteration is a full sweep over all three modes. Modes 1 and 2 come back with
+unit-sum columns and mode 0 carries the component weights, which DECOMPOSITION
+also returns separately as its sixth value:
+
+  lambda: #(3.9999936666558518d0 1.9999979999995001d0)
+
+Those sum to 6, the total observed count. The reported divergence is the
+generalized KL over *every* coordinate, so it includes the predicted mass on the
+21 implicit zeros of this 2x3x4 tensor, not just the 3 stored non-zeros.
 |#
