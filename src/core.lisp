@@ -901,7 +901,12 @@ overflows, which a different initialization does not change."
           (vector-push-extend kl-value kl-history)
           (setf final-kl kl-value)
           (when verbose
-            (format t "iteration: ~A, kl-divergence: ~A, kkt-residual: ~,3E~%"
+            ;; Deliberately not called the KKT residual: this is the free screen,
+            ;; measured before each mode's own update, so it describes staggered
+            ;; states rather than the normalized model whose KL sits beside it.
+            ;; The settled residual costs a pass per mode and is reported once,
+            ;; on the closing line.
+            (format t "iteration: ~A, kl-divergence: ~A, kkt-screen: ~,3E~%"
                     iterations kl-value sweep-residual))
           (when (and kkt-limit (plusp kkt-limit) (< sweep-residual kkt-limit))
             ;; The screen tripped; confirm against the model that actually came
@@ -965,7 +970,11 @@ overflows, which a different initialization does not change."
               :operation "KKT residual"))
      (%check-factor-health factor-matrix-vector lambda-vector
                            :dead-component-threshold dead-component-threshold
-                           :on-dead-component on-dead-component))
+                           :on-dead-component on-dead-component)
+     (when verbose
+       (format t "final: iterations ~D, kl-divergence ~A, kkt-residual ~,3E, converged ~A~%"
+               iterations final-kl residual (and converged-p t))
+       (finish-output)))
     (values iterations final-kl kl-history converged-p lambda-vector residual)))
 
 (defstruct mode-spec
@@ -1016,7 +1025,10 @@ N-CYCLE       - maximum *outer iterations*; defaults to 100. One outer iteration
                 non-negative integer; 0 runs no updates but still returns the
                 initial model in the normalized representation below.
 R             - latent rank shared across factor matrices; defaults to 20.
-VERBOSE       - when true, emit per-iteration logs; defaults to NIL.
+VERBOSE       - when true, emit per-iteration logs; defaults to NIL. The
+                per-iteration line reports KKT-SCREEN, the free in-sweep value,
+                not the settled residual; the closing line reports the settled
+                one, which is the seventh return value.
 CONVERGENCE-THRESHOLD - optional relative tolerance for the moving-average test.
 CONVERGENCE-WINDOW    - smoothing window length; defaults to 5.
 KKT-TOLERANCE - stop once the largest KKT violation falls below this; defaults

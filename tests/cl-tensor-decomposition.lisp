@@ -3531,3 +3531,30 @@ is a NaN."
           (cltd:numerical-instability-error () t)
           (error () nil))
         (format nil ":n-starts ~D signals rather than returning a NaN loss" n-starts))))
+
+(deftest verbose-output-does-not-mislabel-the-in-sweep-screen
+  "The per-iteration log must not call the screen the KKT residual.
+
+The value a sweep observes for free is measured before each mode's own update,
+so it describes staggered states rather than the normalized model whose KL is
+printed beside it. Naming it `kkt-residual' made the log disagree with both the
+returned residual and the number convergence is decided on."
+  (let* ((*random-state* (cltd:%seed-random-state 20260827))
+         (output (with-output-to-string (*standard-output*)
+                   (cltd:decomposition X-tensor :r 2 :n-cycle 4 :verbose t
+                                                :on-dead-component :ignore))))
+    (ok (search "kkt-screen:" output)
+        "The per-iteration value is labelled as the screen")
+    (ok (not (search "kkt-residual:" (subseq output 0 (search "final:" output))))
+        "No per-iteration line claims to print the KKT residual")
+    (ok (search "final:" output)
+        "A closing line reports the settled state"))
+  (let* ((*random-state* (cltd:%seed-random-state 20260827))
+         (residual nil)
+         (output (with-output-to-string (*standard-output*)
+                   (setf residual
+                         (nth-value 6 (cltd:decomposition X-tensor :r 2 :n-cycle 4
+                                                          :verbose t
+                                                          :on-dead-component :ignore))))))
+    (ok (search (format nil "kkt-residual ~,3E" residual) output)
+        (format nil "The closing line reports the returned residual (~,3E)" residual))))
